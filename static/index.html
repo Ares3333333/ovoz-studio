@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <title>Ovoz — subtitr, dublyaj va tarjima studiyasi</title>
+  <meta name="description" content="Ovoz AI Studio: uz ↔ ru ↔ en subtitr, dublyaj va hujjat tarjimasi. Creators, agencies and migrants across Central Asia.">
+  <!-- SEO / Social -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Ovoz AI Studio — Uzbek-first Subtitles, Dubbing & Translation">
+  <meta property="og:description" content="AI-powered subtitles, dubbing, and document translation for uz ↔ ru ↔ en. Built for creators, agencies, and migrants.">
+  <meta property="og:url" content="https://ovoz.app">
+  <meta property="og:site_name" content="Ovoz AI Studio">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Ovoz AI Studio">
+  <meta name="twitter:description" content="Uzbek-first subtitles and AI dubbing. For real.">
+  <link rel="canonical" href="https://ovoz.app">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <!-- JSON-LD structured data -->
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Ovoz AI Studio","applicationCategory":"MultimediaApplication","operatingSystem":"Web","offers":{"@type":"Offer","price":"0","priceCurrency":"UZS","description":"10 free minutes on signup"},"description":"AI-powered subtitles, dubbing, and document translation for Uzbek, Russian, and English."}
+  </script>
+  <script src="tg-boot.js?v=0.21.2"></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26'%3E%3Crect width='26' height='26' rx='6' fill='%230b0d12'/%3E%3Cpath d='M5 13h2M9.5 8v10M13 5v16M16.5 9v8M20 11.5v3M22 13h1' stroke='%2334e2a0' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css?v=0.21.2">
+</head>
+<body>
+<div class="page">
+
+  <!-- ══════════ NAV ══════════ -->
+  <header class="nav">
+    <a class="wordmark" href="#top" aria-label="Ovoz">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+        <path d="M3 13h2.2M8 7.5v11M12 4v18M16 8.5v9M20 11v4M23.5 13H24" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+      Ovoz
+    </a>
+    <nav class="nav-links" aria-label="Sections" data-i18n-aria="nav_sections">
+      <a href="#how" data-i18n="nav_how"></a>
+      <a href="#ling" data-i18n="nav_ling"></a>
+      <a href="#pricing" data-i18n="nav_pricing"></a>
+    </nav>
+    <div class="nav-actions">
+      <div class="lang-switch" role="group" aria-label="Language" data-i18n-aria="lang_label">
+        <button data-lang="uz">UZ</button><button data-lang="ru">RU</button><button data-lang="en">EN</button>
+      </div>
+      <button class="btn btn-solid" id="btn-open-studio" data-i18n="nav_open"></button>
+    </div>
+  </header>
+
+  <!-- ══════════ LANDING ══════════ -->
+  <section class="hero" id="top">
+    <canvas id="wave" class="hero-wave" aria-hidden="true"></canvas>
+    <div class="hero-inner">
+      <h1 class="display" data-i18n="hero_h1"></h1>
+      <p class="lede" data-i18n="hero_lede"></p>
+      <div class="hero-cta">
+        <button class="btn btn-solid btn-lg" data-open-studio data-i18n="hero_try"></button>
+        <a class="btn btn-quiet" href="#how" data-i18n="hero_learn"></a>
+      </div>
+      <p class="hero-note" data-i18n="hero_note"></p>
+    </div>
+  </section>
+
+  <section class="how" id="how">
+    <h2 class="section-title" data-i18n="how_title"></h2>
+    <ol class="steps">
+      <li><span class="step-n">1</span>
+        <h3 data-i18n="step1_t"></h3><p data-i18n="step1_d"></p></li>
+      <li><span class="step-n">2</span>
+        <h3 data-i18n="step2_t"></h3><p data-i18n="step2_d"></p></li>
+      <li><span class="step-n">3</span>
+        <h3 data-i18n="step3_t"></h3><p data-i18n="step3_d"></p></li>
+    </ol>
+  </section>
+
+  <!-- ══════════ LIVE LANGUAGE ENGINE DEMO (the moat) ══════════ -->
+  <section class="ling-demo" id="ling">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="ling_title"></h2>
+      <p class="ling-sub" data-i18n="ling_sub"></p>
+    </div>
+    <div class="ling-grid">
+      <div class="ling-input">
+        <label class="ling-label" for="ling-text" data-i18n="lingInputLabel"></label>
+        <textarea id="ling-text" class="ling-textarea" rows="4" spellcheck="false"
+          maxlength="5000" data-i18n-ph="lingPlaceholder"></textarea>
+        <div class="ling-controls">
+          <div class="ling-seg" role="radiogroup" aria-label="direction" data-i18n-aria="lingDirAria">
+            <button type="button" class="ling-dir is-active" role="radio" aria-checked="true" data-dir="latin"
+              data-i18n="lingToLatin"></button>
+            <button type="button" class="ling-dir" role="radio" aria-checked="false" data-dir="cyrillic"
+              data-i18n="lingToCyr"></button>
+            <button type="button" class="ling-dir" role="radio" aria-checked="false" data-dir="new_latin"
+              data-i18n="lingToNew"></button>
+          </div>
+          <label class="ling-official">
+            <input type="checkbox" id="ling-official" />
+            <span data-i18n="lingOfficial"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ling-output" aria-live="polite">
+        <div id="ling-result" class="ling-result" lang="uz"></div>
+        <ul class="ling-metrics" id="ling-metrics"></ul>
+        <p class="ling-badge" data-i18n="lingBadge"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ OVOZ TURN: speaker attribution (the second moat) ══════════ -->
+  <section class="turn-demo" id="turn">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="turn_title"></h2>
+      <p class="ling-sub" data-i18n="turn_sub"></p>
+    </div>
+    <div class="turn-wrap">
+      <ol class="turn-lines" id="turn-lines" data-i18n-aria="turn_aria"></ol>
+      <div class="turn-side">
+        <button type="button" class="btn btn-solid btn-block" id="turn-run" data-i18n="turn_run"></button>
+        <!-- The result of the demo lands asynchronously: without a live region a
+             screen reader never hears that attribution finished. -->
+        <ul class="ling-metrics" id="turn-metrics" aria-live="polite" aria-atomic="true"></ul>
+        <p class="ling-badge" data-i18n="turn_badge"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ OVOZ QATOR: layout & readability (the third moat layer) ══════════ -->
+  <section class="turn-demo qator-demo" id="qator">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="qator_title"></h2>
+      <p class="ling-sub" data-i18n="qator_sub"></p>
+    </div>
+    <div class="qator-wrap">
+      <ol class="qator-cards" id="qator-cards" data-i18n-aria="qator_aria"></ol>
+      <div class="turn-side">
+        <button type="button" class="btn btn-solid btn-block" id="qator-run" data-i18n="qator_run"></button>
+        <!-- Same rule as Ovoz Turn: the answer arrives asynchronously, so the
+             numbers must be announced. aria-atomic so a repaint reads the whole
+             metric list rather than one changed number out of context. -->
+        <ul class="ling-metrics" id="qator-metrics" aria-live="polite" aria-atomic="true"></ul>
+        <p class="ling-badge" data-i18n="qator_badge"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ OVOZ JIMLIK: silence-gap boundary alignment (the fourth moat layer) ══════════ -->
+  <section class="turn-demo qator-demo jimlik-demo" id="jimlik">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="jimlik_title"></h2>
+      <p class="ling-sub" data-i18n="jimlik_sub"></p>
+    </div>
+    <div class="qator-wrap">
+      <ol class="qator-cards jimlik-rows" id="jimlik-rows" data-i18n-aria="jimlik_aria"></ol>
+      <div class="turn-side">
+        <button type="button" class="btn btn-solid btn-block" id="jimlik-run" data-i18n="jimlik_run"></button>
+        <!-- Same contract as Qator: the answer is computed on every click, so the
+             numbers must be announced rather than painted silently in. -->
+        <ul class="ling-metrics" id="jimlik-metrics" aria-live="polite" aria-atomic="true"></ul>
+        <p class="ling-badge" data-i18n="jimlik_badge"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ OVOZ SO'Z: word-level timing inside the cues (the fifth moat layer) ══════════ -->
+  <section class="turn-demo qator-demo jimlik-demo soz-demo" id="soz">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="soz_title"></h2>
+      <p class="ling-sub" data-i18n="soz_sub"></p>
+    </div>
+    <div class="qator-wrap soz-wrap">
+      <div class="soz-body">
+        <ol class="soz-rows" id="soz-rows" data-i18n-aria="soz_aria"></ol>
+        <p class="soz-hint" id="soz-hint" data-i18n="soz_hint"></p>
+        <dl class="soz-read" id="soz-read" aria-live="polite" aria-atomic="true"></dl>
+      </div>
+      <div class="turn-side">
+        <button type="button" class="btn btn-solid btn-block" id="soz-run" data-i18n="soz_run"></button>
+        <button type="button" class="btn btn-quiet btn-block hidden" id="soz-play" data-i18n="soz_play"></button>
+        <ul class="ling-metrics" id="soz-metrics" aria-live="polite" aria-atomic="true"></ul>
+        <p class="ling-badge" data-i18n="soz_badge"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ OVOZ NAFIS: the right to cut an Uzbek sentence (the sixth moat layer) ══════════ -->
+  <section class="turn-demo qator-demo jimlik-demo soz-demo nafis-demo" id="nafis">
+    <div class="ling-head">
+      <h2 class="section-title" data-i18n="nafis_title"></h2>
+      <p class="ling-sub" data-i18n="nafis_sub"></p>
+    </div>
+    <div class="qator-wrap nafis-wrap">
+      <div class="nf-body">
+        <p class="nf-ruler" id="nf-ruler" data-i18n-aria="nf_aria" aria-busy="false"></p>
+        <p class="nf-list" id="nf-list" aria-live="polite" aria-atomic="true"></p>
+        <p class="nf-hint" id="nf-hint" data-i18n="nafis_hint"></p>
+      </div>
+      <div class="turn-side">
+        <button type="button" class="btn btn-solid btn-block" id="nafis-run" data-i18n="nafis_run"></button>
+        <ul class="ling-metrics" id="nafis-metrics" aria-live="polite" aria-atomic="true"></ul>
+        <p class="ling-badge" data-i18n="nafis_badge"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="caps">
+    <article class="cap cap-big">
+      <h3 data-i18n="cap_dub_t"></h3>
+      <p data-i18n="cap_dub_d"></p>
+      <div class="cap-mock" aria-hidden="true">
+        <div class="mock-line w90"></div><div class="mock-line w70"></div>
+        <div class="mock-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+    </article>
+    <div class="cap-side">
+      <article class="cap"><h3 data-i18n="cap_sub_t"></h3><p data-i18n="cap_sub_d"></p></article>
+      <article class="cap"><h3 data-i18n="cap_doc_t"></h3><p data-i18n="cap_doc_d"></p></article>
+      <article class="cap"><h3 data-i18n="cap_glo_t"></h3><p data-i18n="cap_glo_d"></p></article>
+    </div>
+  </section>
+
+  <section class="pricing" id="pricing">
+    <h2 class="section-title" data-i18n="pricing_title"></h2>
+    <div class="tiers" id="tiers"><!-- из /api/plans --></div>
+    <p class="pricing-note" data-i18n="pricing_note"></p>
+  </section>
+
+  <!-- ══════════ STUDIO APP ══════════ -->
+  <main class="studio hidden" id="studio">
+    <div class="studio-bar">
+      <div class="sb-left">
+        <button class="btn btn-quiet btn-sm" id="btn-back" data-i18n="back"></button>
+        <h2 data-i18n="studio_title"></h2>
+      </div>
+      <div class="sb-right">
+        <button class="btn btn-quiet btn-sm notif-bell" id="btn-notif" aria-label="Notifications"
+          title="Notifications" data-i18n-title="notif_title" data-i18n-aria="notif_title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 19a2 2 0 0 1-3.4 0"/></svg>
+          <span class="notif-badge hidden" id="notif-badge">0</span>
+        </button>
+        <button class="btn btn-quiet btn-sm" id="btn-topup" data-i18n="topup"></button>
+        <button class="btn btn-quiet btn-sm" id="btn-settings" aria-label="Settings" data-i18n-aria="settings"
+          title="Settings" data-i18n-title="settings">⚙️</button>
+        <span class="balance" id="balance" hidden></span>
+        <button class="btn btn-quiet btn-sm hidden" id="logout" data-i18n="logout"></button>
+      </div>
+    </div>
+    <!-- Notification dropdown -->
+    <div class="notif-panel hidden" id="notif-panel" role="dialog" aria-label="Notifications" data-i18n-aria="notif_title">
+      <div class="notif-head">
+        <strong data-i18n="notif_title"></strong>
+        <button class="btn btn-quiet btn-sm" id="notif-mark-all" data-i18n="notif_mark_all"></button>
+      </div>
+      <div class="notif-list" id="notif-list"></div>
+    </div>
+
+    <div class="grid">
+      <!-- LEFT: compose -->
+      <section class="panel" aria-labelledby="compose-h">
+        <h3 id="compose-h" data-i18n="new_job"></h3>
+
+        <div class="auth-card" id="auth-card">
+          <p data-i18n="auth_sub"></p>
+          <input id="f-name" data-i18n-ph="name" autocomplete="name">
+          <input id="f-contact" data-i18n-ph="contact" inputmode="tel" autocomplete="tel">
+          <input id="f-secret" type="password" data-i18n-ph="secret_ph" autocomplete="current-password">
+          <div class="row-gap">
+            <button class="btn btn-solid" id="btn-register" data-i18n="register"></button>
+            <button class="btn btn-quiet" id="btn-login" data-i18n="login"></button>
+          </div>
+        </div>
+
+        <form id="job-form" class="hidden">
+          <div class="seg" role="tablist" id="type-seg">
+            <button type="button" class="on" data-type="subtitles" data-i18n="t_subtitles"></button>
+            <button type="button" data-type="dubbing" data-i18n="t_dubbing"></button>
+            <button type="button" data-type="transcribe" data-i18n="t_transcribe"></button>
+            <button type="button" data-type="document" data-i18n="t_document"></button>
+          </div>
+
+          <div class="lang-row">
+            <select id="j-src" aria-label="Source" data-i18n-aria="lang_src_aria">
+              <option value="uz">O'zbekcha</option><option value="ru">Ruscha</option><option value="en">English</option>
+            </select>
+            <button type="button" class="swap" id="swap" aria-label="Swap languages" data-i18n-aria="swap_aria">⇄</button>
+            <select id="j-tgt" aria-label="Target" data-i18n-aria="lang_tgt_aria">
+              <option value="ru">Ruscha</option><option value="uz">O'zbekcha</option><option value="en">English</option>
+            </select>
+          </div>
+
+          <div class="drop" id="dropzone" tabindex="0" role="button" aria-label="File" data-i18n-aria="drop_hint">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"/></svg>
+            <p id="drop-label" data-i18n="drop_hint"></p>
+            <input type="file" id="j-file" accept=".wav,.mp3,.m4a,.ogg,.mp4,.mov,.txt,.srt,.vtt,.md" hidden>
+          </div>
+
+          <textarea id="j-text" class="hidden" rows="5" data-i18n-ph="doc_ph"></textarea>
+
+          <label class="opt-row" id="diar-row">
+            <input type="checkbox" id="j-diar">
+            <span class="opt-txt"><b data-i18n="diar_opt"></b><small data-i18n="diar_hint"></small></span>
+          </label>
+
+          <label class="opt-row" id="polish-row">
+            <input type="checkbox" id="j-polish">
+            <span class="opt-txt"><b data-i18n="polish_opt"></b><small data-i18n="polish_hint"></small></span>
+          </label>
+
+          <label class="opt-row" id="align-row">
+            <input type="checkbox" id="j-align">
+            <span class="opt-txt"><b data-i18n="align_opt"></b><small data-i18n="align_hint"></small></span>
+          </label>
+
+          <label class="opt-row" id="words-row">
+            <input type="checkbox" id="j-words">
+            <span class="opt-txt"><b data-i18n="words_opt"></b><small data-i18n="words_hint"></small></span>
+          </label>
+
+          <button class="btn btn-solid btn-block" type="submit" id="btn-run" data-i18n="run"></button>
+        </form>
+
+        <div class="glossary">
+          <h4 data-i18n="glossary"></h4>
+          <p class="dim" data-i18n="glossary_hint"></p>
+          <div class="row-gap">
+            <input id="g-src" data-i18n-ph="g_src"><input id="g-tgt" data-i18n-ph="g_tgt">
+            <button class="btn btn-quiet btn-sm" id="g-add" data-i18n="add"></button>
+          </div>
+          <div class="chips" id="glossary-list"></div>
+        </div>
+      </section>
+
+      <!-- RIGHT: jobs -->
+      <section class="panel" aria-labelledby="jobs-h">
+        <h3 id="jobs-h" data-i18n="jobs"></h3>
+        <div class="job-filters" id="job-filters">
+          <button class="filter-pill on" data-filter="" data-i18n="st_all"></button>
+          <button class="filter-pill" data-filter="done" data-i18n="st_done"></button>
+          <button class="filter-pill" data-filter="running" data-i18n="st_running"></button>
+          <button class="filter-pill" data-filter="failed" data-i18n="st_failed"></button>
+        </div>
+        <div class="empty" id="jobs-empty">
+          <p data-i18n="jobs_empty"></p>
+          <p data-i18n="jobs_empty_filter" hidden></p>
+          <button class="btn btn-quiet btn-sm" id="jobs-clear-filter" data-i18n="jobs_show_all" hidden></button>
+        </div>
+        <div id="jobs-list"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- SUBTITLE PREVIEW PLAYER -->
+  <dialog id="player-dlg" class="player-dlg">
+    <div class="player-head">
+      <span data-i18n="player_title"></span>
+      <button class="btn btn-quiet btn-sm" id="player-close" data-i18n="close"></button>
+    </div>
+    <div class="stage" id="stage">
+      <video id="p-video" controls></video>
+      <div class="cue" id="p-cue"></div>
+    </div>
+    <input type="file" id="p-vfile" accept="video/*" hidden>
+    <div class="player-bar">
+      <button class="btn btn-quiet btn-sm" id="p-load-video" data-i18n="player_pick"></button>
+      <span class="dim" id="p-srtname"></span>
+    </div>
+  </dialog>
+
+  <!-- TOP-UP -->
+  <dialog id="pay-dlg" class="pay-dlg">
+    <div class="player-head">
+      <span data-i18n="topup"></span>
+      <button class="btn btn-quiet btn-sm" id="pay-close" data-i18n="close"></button>
+    </div>
+    <div id="pay-body"></div>
+  </dialog>
+
+  <!-- SETTINGS -->
+  <dialog id="settings-dlg" class="pay-dlg">
+    <div class="player-head">
+      <span data-i18n="settings"></span>
+      <button class="btn btn-quiet btn-sm" id="settings-close" aria-label="Close" data-i18n-aria="close"
+        title="Close" data-i18n-title="close">✕</button>
+    </div>
+    <div style="padding:0 20px 20px;display:grid;gap:16px">
+      <section>
+        <h4 style="margin:0 0 8px;font-size:14px" data-i18n="set_display_name"></h4>
+        <div style="display:flex;gap:8px">
+          <input id="set-name" style="flex:1" maxlength="64">
+          <button class="btn btn-solid btn-sm" id="set-name-save" data-i18n="set_save"></button>
+        </div>
+      </section>
+      <section>
+        <h4 style="margin:0 0 8px;font-size:14px" data-i18n="set_change_secret"></h4>
+        <input id="set-old" type="password" data-i18n-ph="set_cur_ph" style="margin-bottom:8px">
+        <input id="set-new" type="password" data-i18n-ph="set_new_ph">
+        <button class="btn btn-solid btn-sm" id="set-secret-save" style="margin-top:8px" data-i18n="set_update"></button>
+      </section>
+      <section>
+        <h4 style="margin:0 0 8px;font-size:14px" data-i18n="set_data_privacy"></h4>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-quiet btn-sm" id="set-export" data-i18n="set_export"></button>
+          <button class="btn btn-quiet btn-sm" id="set-delete" style="color:var(--danger)" data-i18n="set_delete"></button>
+        </div>
+      </section>
+      <section>
+        <h4 style="margin:0 0 8px;font-size:14px" data-i18n="set_usage_billing"></h4>
+        <div id="usage-body" class="usage"><span class="dim" data-i18n="usage_loading"></span></div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- FIRST-RUN ONBOARDING -->
+  <div class="onb hidden" id="onboarding" role="dialog" aria-modal="true" aria-labelledby="onb-title">
+    <div class="onb-card">
+      <div class="onb-dots" id="onb-dots" aria-hidden="true"></div>
+      <div class="onb-icon" id="onb-icon" aria-hidden="true"></div>
+      <h3 id="onb-title" class="onb-title"></h3>
+      <p id="onb-body" class="onb-body"></p>
+      <div class="onb-actions">
+        <button class="btn btn-quiet btn-sm" id="onb-skip" data-i18n="onb_skip"></button>
+        <button class="btn btn-solid btn-sm" id="onb-next" data-i18n="onb_next"></button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <p data-i18n="footer"></p>
+    <p class="dim" data-i18n="footer2"></p>
+  </footer>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<div id="aria-announce" aria-live="assertive" class="sr-only"></div>
+
+<script src="i18n.js?v=0.21.2"></script>
+<script src="app.js?v=0.21.2"></script>
+<script src="sw-boot.js?v=0.21.2"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# runtime — жёстко запинено, воспроизводимый образ.
+# для обновления: pip-compile requirements.in (или вручную bump + pytest)
+fastapi==0.141.1
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+httpx==0.28.1

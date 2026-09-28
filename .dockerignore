@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+*.egg-info
+.venv
+venv
+
+# Data (volume-mounted in production)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets & config
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode
+.idea
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Dev scripts not needed in image
+scripts/
+tests/
+*.md
+LICENSE
+docker-compose*.yml
+Dockerfile*
+Makefile
+.github/

@@ -1,0 +1,52 @@
+services:
+  ovoz:
+    build: .
+    # публикация только на localhost — TLS и публичный доступ настраивает reverse proxy
+    ports:
+      - "127.0.0.1:8080:8080"
+    # секреты идут через env_file, а не CLI-аргументы: не попадают в shell
+    # history, `docker compose config` и `docker inspect`.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # обязательно для боя — fail-fast, если не заданы ни в .env, ни в окружении
+      OVOZ_WEBHOOK_SECRET: ${OVOZ_WEBHOOK_SECRET:?нужен HMAC-ключ подписей Payme/Click}
+      OVOZ_ADMIN_SECRET: ${OVOZ_ADMIN_SECRET:?нужен ключ демо-начислений/админа}
+      # ключи провайдеров (когда будут)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OVOZ_ASR_PROVIDER: ${OVOZ_ASR_PROVIDER:-sim}
+      OVOZ_TRANSLATE_PROVIDER: ${OVOZ_TRANSLATE_PROVIDER:-sim}
+      OVOZ_TTS_PROVIDER: ${OVOZ_TTS_PROVIDER:-sim}
+      OVOZ_WHISPER_BIN: ${OVOZ_WHISPER_BIN:-}
+      OVOZ_FFMPEG_BIN: ${OVOZ_FFMPEG_BIN:-ffmpeg}
+      OVOZ_FFPROBE_BIN: ${OVOZ_FFPROBE_BIN:-ffprobe}
+      OVOZ_SIGNUP_BONUS_MINUTES: ${OVOZ_SIGNUP_BONUS_MINUTES:-10}
+      OVOZ_RETENTION_DAYS: ${OVOZ_RETENTION_DAYS:-7}
+      OVOZ_ALLOW_DEMO_CREDIT: ${OVOZ_ALLOW_DEMO_CREDIT:-0}
+      OVOZ_TRUSTED_PROXIES: ${OVOZ_TRUSTED_PROXIES:-}
+    volumes:
+      - ovoz-data:/data
+    restart: unless-stopped
+    init: true                       # PID-1 reaping для ffprobe-дочерних
+    read_only: true                  # корень только-чтение; пишет в /data и /tmp
+    tmpfs:
+      - /tmp:size=64m                # python-multipart споллит большие тела сюда
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    # SQLite WAL + фоновые воркеры в потоках => один реплика на том же томе.
+    # Масштабирование реплик — после выноса очереди jobs во внешний брокер.
+    cpus: 2
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ovoz-data:

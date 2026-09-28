@@ -1,0 +1,50 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest -q --tb=short
+        env:
+          OVOZ_SYNC_PIPELINE: "1"
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (no push)
+        run: docker build -t ovoz-studio:ci .
+      - name: Smoke test container
+        run: |
+          docker run -d --name ovoz-ci -p 8080:8080 \
+            -e OVOZ_SYNC_PIPELINE=1 \
+            -e OVOZ_ADMIN_SECRET=ci-test-key \
+            ovoz-studio:ci
+          sleep 5
+          curl -sf http://localhost:8080/healthz | grep '"ok":true'
+          docker stop ovoz-ci && docker rm ovoz-ci
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install ruff
+      - run: ruff check app/ --select E,F,W --ignore E501

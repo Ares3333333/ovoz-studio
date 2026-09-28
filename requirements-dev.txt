@@ -1,0 +1,3 @@
+# dev/test — не попадает в боевой образ
+pytest==9.1.1
+edge-tts==7.0.2  # опционально: реальный TTS uz/ru/en, иначе stub-fallback
