@@ -142,6 +142,7 @@ def cfg(monkeypatch):
     happened to know the field exists.
     """
     names = ["asr_provider", "whisper_bin", "whisper_model", "asr_dialect",
+             "asr_model", "asr_compute",
              "translate_provider", "openai_api_key", "openai_model", "tts_provider"]
     conf = SimpleNamespace(**{n: getattr(settings, n) for n in names})
     for mod in (A, TR, TTS):
@@ -296,3 +297,82 @@ def test_speech_to_text_type_carries_the_same_flag(client, auth):
     job = _submit(client, auth, "take.wav", wav_bytes(interview()), jtype="transcribe")
     assert job["engines"]["asr_demo"] is True
     assert "transcript" in job["artifacts"]
+
+
+# ─── faster-whisper: the real, offline, no-key Python provider (Round 30) ──────
+
+class _FakeSpec:
+    """Stands in for importlib.util.find_spec so the faster branch is testable
+    whether or not faster-whisper is installed in the running environment (CI has
+    no heavy CTranslate2 wheel; this machine does)."""
+
+    def __init__(self, present): self._p = present
+    def __call__(self, name): return object() if (self._p and name == "faster_whisper") else None
+
+
+def test_faster_without_the_package_is_honest_not_silent(cfg, monkeypatch):
+    """`OVOZ_ASR_PROVIDER=faster` with the library missing must not hand a customer a
+    demo transcript and call it real — the whole point of the Round-24 status split."""
+    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(False))
+    cfg.asr_provider = "faster"
+    cfg.asr_model = "base"
+    st = A.status()
+    assert st["mode"] == "sim" and st["code"] == "package_missing", st
+
+
+def test_faster_needs_a_model_size(cfg, monkeypatch):
+    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    cfg.asr_provider = "faster"
+    cfg.asr_model = ""
+    st = A.status()
+    assert st["mode"] == "sim" and st["code"] == "no_model_configured", st
+
+
+def test_faster_configured_and_present_reports_real(cfg, monkeypatch):
+    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    cfg.asr_provider = "faster"
+    cfg.asr_model = "base"
+    cfg.asr_compute = "int8"
+    st = A.status()
+    assert st["mode"] == "real" and st["code"] == "ok", st
+    assert st["operator"]["faster_model"] == "base"
+
+
+def test_get_asr_reuses_one_loaded_model_per_size(cfg, monkeypatch):
+    """The weights are big; a fresh WhisperModel per job would pay ~10 s of load on
+    every request. get_asr must hand back the same instance for the same (size,cpu)."""
+    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    cfg.asr_provider = "faster"
+    cfg.asr_model = "small"
+    cfg.asr_compute = "int8"
+    A._FASTER_SINGLETON.clear()
+    a = A.get_asr()
+    b = A.get_asr()
+    assert isinstance(a, A.FasterWhisperASR)
+    assert a is b and a.model_size == "small", "model instance was not reused"
+
+
+def test_faster_transcribe_maps_segments_to_the_shared_contract(tmp_path, monkeypatch):
+    """faster-whisper yields its own segment objects; the pipeline speaks Segment with
+    float seconds. A unit (fake model) so it runs offline and in CI."""
+    class Seg:
+        def __init__(self, s, e, t): self.start, self.end, self.text = s, e, t
+
+    class FakeModel:
+        def transcribe(self, path, language=None, beam_size=5):
+            return [Seg(0.0, 3.2, "  salom  "), Seg(3.2, 5.0, ""),
+                    Seg(5.0, 8.0, "kv")], object()
+
+    prov = A.FasterWhisperASR("base")
+    prov._model = FakeModel()          # bypass the real weight load
+    segs = prov.transcribe(tmp_path / "a.mp3", "uz")
+    assert [s.text for s in segs] == ["salom", "kv"], segs   # blank dropped, stripped
+    assert segs[0].start == 0.0 and segs[0].end == 3.2
+
+
+def test_public_info_never_leaks_the_faster_model_or_package(client, monkeypatch):
+    """`/api/v1/info` is anonymous. Which whisper model this host runs and whether the
+    package is installed is operator topology, not a customer fact."""
+    st = client.get("/api/v1/info").json()["providers"]["asr"]
+    assert "operator" not in st
+    assert "faster_model" not in st and "faster_package" not in st

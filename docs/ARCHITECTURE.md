@@ -15,9 +15,9 @@
  Pipeline (app/pipeline.py) ── state machine: queued → running → done|failed (+refund)
         │
  ├─ Providers (адаптерный слой, sim/real переключается конфигом):
- │    ASR       sim (транскрипт/sidecar)   | whisper CLI (OVOZ_WHISPER_BIN)
+ │    ASR       sim (транскрипт/sidecar)   | faster-whisper (локально, офлайн) | whisper CLI
  │    Translate demo-dict                  | OpenAI-совместимый LLM (ключ)
- │    TTS       stub-tone (честный офлайн) | edge-tts (uz-MM-AtiyeNeural!)
+ │    TTS       stub-tone (честный офлайн) | edge-tts (uz-UZ-MadinaNeural)
  │
  └─ Ling-ядро (собственный модуль = «ров» продукта):
       romanizer  узбекская кириллица ↔ латиница, нормализация апострофа
@@ -40,8 +40,9 @@
    падении — воркер не может «съесть» деньги молча.
 5. **Адаптерный слой провайдеров**: демо-режим (sim) прогоняет весь пайплайн
    end-to-end офлайн; реальные модели/ключи подключаются env-переменными без
-   изменения кода. Для продакшена узбекский TTS уже выбран: Edge имеет
-   нейро-голос `uz-MM-AtiyeNeural`.
+   изменения кода. Для продакшена: узбекский TTS — Edge `uz-UZ-MadinaNeural`, а
+   ASR — локальный `faster-whisper` (без ключа, офлайн после загрузки модели) или
+   внешний whisper CLI.
 6. **Языковой слой отдельно от ML**: транслитерация/глоссарии/SRT работают
    детерминированно и покрыты юнит-тестами — это то, что «съедают» все
    наивные обёртки над Whisper.

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -165,6 +166,56 @@ class WhisperASR:
             shutil.rmtree(out_dir, ignore_errors=True)
 
 
+class FasterWhisperASR:
+    """Реальный офлайн-ASR через faster-whisper (CTranslate2, CPU, без torch).
+
+    В отличие от CLI-диалекта, не требует внешнего бинарника: тянет модель из
+    локального HF-кэша при первом запуске и после — работает полностью офлайн.
+    Модель грузится лениво и переиспользуется между задачами одного процесса
+    (синглтон ниже), иначе каждый job платил бы ~10 с за загрузку весов."""
+
+    name = "faster-whisper"
+
+    def __init__(self, model_size: str, compute: str = "int8", device: str = "cpu") -> None:
+        self.model_size = model_size
+        self.compute = compute
+        self.device = device
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            from faster_whisper import WhisperModel
+            self._model = WhisperModel(self.model_size, device=self.device,
+                                       compute_type=self.compute)
+        return self._model
+
+    def transcribe(self, audio_path: Path, lang: str) -> list[Segment]:
+        model = self._load()
+        segments, _info = model.transcribe(str(audio_path),
+                                           language=lang or None, beam_size=5)
+        out: list[Segment] = []
+        for s in segments:
+            text = str(getattr(s, "text", "")).strip()
+            if text:
+                out.append(Segment(round(float(s.start), 3),
+                                   round(float(s.end), 3), text))
+        return out
+
+
+# One loaded model per (size, compute, device): the weights are big and slow to
+# load, and a worker process runs many jobs, so the instance is cached deliberately.
+_FASTER_SINGLETON: dict[tuple, FasterWhisperASR] = {}
+
+
+def _faster_provider(model_size: str, compute: str, device: str) -> FasterWhisperASR:
+    key = (model_size, compute, device)
+    prov = _FASTER_SINGLETON.get(key)
+    if prov is None:
+        prov = FasterWhisperASR(model_size, compute, device)
+        _FASTER_SINGLETON[key] = prov
+    return prov
+
+
 def status() -> dict:
     """What the deployment claims about ASR against what it can prove right now.
 
@@ -180,10 +231,26 @@ def status() -> dict:
     model = settings.whisper_model
     dialect = settings.asr_dialect if settings.asr_dialect in DIALECTS else "auto"
     found = bool(binary) and bool(shutil.which(binary))
+    pkg = importlib.util.find_spec("faster_whisper") is not None
     out = {"provider": provider, "mode": "sim", "code": "", "reason": "",
            "operator": {"binary": binary or None, "binary_found": found,
                         "dialect": dialect, "model": model or None,
-                        "model_found": bool(model) and Path(model).exists()}}
+                        "model_found": bool(model) and Path(model).exists(),
+                        "faster_package": pkg, "faster_model": settings.asr_model or None}}
+    # faster-whisper is a Python provider judged by the package + a chosen model
+    # size, not by a CLI binary. The weights download once, then serve offline.
+    if provider == "faster":
+        if not pkg:
+            out["code"] = "package_missing"
+            out["reason"] = "OVOZ_ASR_PROVIDER=faster but faster-whisper is not installed"
+            return out
+        if not settings.asr_model:
+            out["code"] = "no_model_configured"
+            out["reason"] = ("OVOZ_ASR_PROVIDER=faster needs OVOZ_ASR_MODEL "
+                             "(tiny/base/small/medium/large-v3)")
+            return out
+        out["mode"], out["code"], out["reason"] = "real", "ok", ""
+        return out
     if provider != "real":
         out["code"], out["reason"] = "no_provider", "demo transcription (no provider configured)"
         return out
@@ -209,10 +276,13 @@ def status() -> dict:
     return out
 
 
-def get_asr() -> SimASR | WhisperASR:
+def get_asr() -> SimASR | WhisperASR | FasterWhisperASR:
     """The provider to use now — see `status()` for why it is the one."""
     st = status()
     if st["mode"] == "real":
+        if st["provider"] == "faster":
+            return _faster_provider(st["operator"]["faster_model"],
+                                    settings.asr_compute, "cpu")
         op = st["operator"]
         return WhisperASR(op["binary"], op["dialect"], op["model"] or "")
     return SimASR()

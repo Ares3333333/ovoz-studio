@@ -1,4 +1,4 @@
-# Ovoz AI Studio — v0.26
+# Ovoz AI Studio — v0.27
 
 Языковая AI-инфраструктура для Узбекистана и тюркских low-resource языков:
 **субтитры, даббинг и перевод документов uz ↔ ru ↔ en** для креаторов, SME и мигрантов.
@@ -23,9 +23,12 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8077
 ## Боевой режим и безопасность (когда появятся ключи)
 
 ```env
-OVOZ_ASR_PROVIDER=real        # + OVOZ_WHISPER_BIN=<путь к whisper CLI>
+# ASR — боевой локальный вариант без ключа (рекомендуем):
+OVOZ_ASR_PROVIDER=faster      # pip install -r requirements-asr.txt (faster-whisper, CPU,
+                              # офлайн после первой загрузки модели) + OVOZ_ASR_MODEL=small
+OVOZ_ASR_PROVIDER=real        # альтернатива: внешний whisper CLI + OVOZ_WHISPER_BIN=<путь>
 OVOZ_TRANSLATE_PROVIDER=openai# + OPENAI_API_KEY=sk-...
-OVOZ_TTS_PROVIDER=edge        # pip install edge-tts (голос uz-MM-AtiyeNeural)
+OVOZ_TTS_PROVIDER=edge        # pip install edge-tts (голос uz-UZ-MadinaNeural)
 TELEGRAM_BOT_TOKEN=...        # включает вход через Telegram Mini App (HMAC initData)
 OVOZ_WEBHOOK_SECRET=...       # включает обязательную HMAC-подпись webhook'ов ПС
 OVOZ_ADMIN_SECRET=...         # ключ для /api/dev/demo-credit (демо-начисления витрины)
@@ -903,6 +906,36 @@ Telegram Mini App:
 `/api/v1/info` это видно различимо: `mode: sim` против `mode: real, code: ok`. ASR
 по-прежнему демо (нужен бинарник/ключ) — но даббинг и перевод (OpenAI-ключ) теперь
 боевые контуры, а не обещания.
+
+### Настоящий ASR теперь локальный: faster-whisper, без ключа, офлайн (v0.27)
+
+Все 29 кругов распознавание было демо: движок и провайдер-слой готовы, но нужен был
+бинарник whisper или облачный ключ, а сеть я посчитал недоступной — не проверив.
+Round 29 научил: проверять окружение, а не записывать в невозможное. Сеть есть, и
+оказалось, что боевой ASR можно вообще без ключа и без облака.
+
+- Новый боец `FasterWhisperASR`: `faster-whisper` (CTranslate2, CPU, **без torch**).
+  Ставится из `requirements-asr.txt` — отдельного, преднамеренно не в ядре: CI и
+  обычный запуск живут без него, импорт приложения его не требует (грузится лениво).
+- **Офлайн после первой загрузки**: модель тянется в `~/.cache/huggingface` один раз,
+  дальше работает без сети. Грузится лениво и переиспользуется между задачами одного
+  процесса (синглтон на `(size,compute,device)`), иначе каждый job платил бы ~10 с.
+- Включается env: `OVOZ_ASR_PROVIDER=faster` + `OVOZ_ASR_MODEL=small`. `status()`
+  различает `package_missing` / `no_model_configured` / `real, ok` — без библиотеки
+  продукт честно остаётся на демо, а не выдаёт симуляцию за настоящее.
+- **Живое доказательство сквозняком**: на сервер с `faster` загружен настоящий
+  узбекский голос (тот самый `uz-UZ-MadinaNeural` из Round 29) — продукт распознал
+  его обратно: `mode=real, asr_demo=false`, транскрипт «As-salamu alaikum bu awas ay
+  studiotaushe» вместо `[демо] …`. То есть цепочка **TTS→ASR** работает на машине, без
+  единого внешнего API. Модель `base`/int8 даёт черновой результат (качество
+  низкое для low-resource); для витрины нужен `small`/`medium` и выше.
+- Гейты: статус-ветки faster (нет пакета / нет модели / real), переиспользование
+  синглтона, маппинг сегментов в общий контракт `Segment`, и что публичный
+  `/api/v1/info` не протаскивает имя модели и наличие пакета (операторная топология).
+
+Итог по контурам: **ASR — боевой (локально, без ключа)**, **TTS — боевой (neural
+голос)**, **перевод — боевой (OpenAI-ключ)**. Из внешних зависимостей остаются
+только платежи (нужен договор ПС) и хостинг.
 
 ## Жизненный цикл задачи
 

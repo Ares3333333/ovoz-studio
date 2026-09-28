@@ -31,6 +31,11 @@ class Settings:
     # are both different, so "whisper installed" is not one fact, it is two.
     asr_dialect: str = field(default_factory=lambda: _env("OVOZ_ASR_DIALECT", "auto"))
     whisper_model: str = field(default_factory=lambda: _env("OVOZ_WHISPER_MODEL"))
+    # faster-whisper (Python, CPU, no torch): the model *size* is fetched from the
+    # local HF cache on first use and then works fully offline. Only consulted when
+    # asr_provider == "faster"; an empty value means "not configured for faster".
+    asr_model: str = field(default_factory=lambda: _env("OVOZ_ASR_MODEL"))
+    asr_compute: str = field(default_factory=lambda: _env("OVOZ_ASR_COMPUTE", "int8"))
 
     translate_provider: str = field(default_factory=lambda: _env("OVOZ_TRANSLATE_PROVIDER", "sim"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))

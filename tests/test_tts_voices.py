@@ -33,6 +33,15 @@ def test_the_uzbek_voice_uses_the_only_real_uzbek_locale():
     assert EdgeTTS.VOICES["en"].startswith("en-US-")
 
 
+def test_every_sellable_target_language_has_its_own_voice():
+    """The invariant this round exists to protect: any language the product will sell
+    a dub in must have a first-class voice, or a future LANGS entry would dub in
+    Russian and still reach `done` silently. Also pins the reserved uz_male locale."""
+    from app.main import LANGS
+    assert LANGS <= set(EdgeTTS.VOICES), LANGS - set(EdgeTTS.VOICES)
+    assert EdgeTTS.VOICES["uz_male"].startswith("uz-UZ-")
+
+
 def test_synthesize_selects_the_real_uzbek_voice(tmp_path, monkeypatch):
     """The wiring, not the network: the voice handed to edge-tts for lang 'uz' must
     be the Madina id, and an unknown language must fall back to Russian rather than

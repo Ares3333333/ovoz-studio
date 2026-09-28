@@ -1,0 +1,10 @@
+# Optional: real, local, offline ASR via faster-whisper (CTranslate2, CPU, no torch).
+# Not in requirements.txt on purpose — the core product and CI run without it, and
+# importing app never needs it (it is loaded lazily inside the provider). Install
+# this only on a machine that will do real transcription:
+#   pip install -r requirements-asr.txt
+# then: OVOZ_ASR_PROVIDER=faster  OVOZ_ASR_MODEL=small
+# The first transcription downloads the model from Hugging Face into
+# ~/.cache/huggingface; every run after that is fully offline.
+faster-whisper==1.2.1
+ctranslate2==4.8.2

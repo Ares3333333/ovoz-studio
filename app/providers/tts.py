@@ -50,8 +50,12 @@ class EdgeTTS:
         "ru": "ru-RU-SvetlanaNeural",
         "en": "en-US-JennyNeural",
     }
-    # Only the three shipped UI languages get a first-class key; anything else
-    # falls back to Russian rather than inventing a voice id that 404s.
+    # `uz`/`ru`/`en` are selectable (they match the job LANGS the dubbing target can
+    # be). `uz_male` is a real voice we verified but is NOT yet reachable: no form
+    # field, job meta or flag selects a gender, so a dub of speaker 1 vs 2 still uses
+    # one voice per language. It is kept here, reserved, so per-speaker casting can
+    # wire it end-to-end later without guessing an id again. Anything else falls back
+    # to Russian rather than inventing a voice id that 404s.
     name = "edge-tts"
 
     def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float) -> None:
