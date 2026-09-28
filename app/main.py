@@ -23,6 +23,7 @@ from fastapi import (Depends, FastAPI, File, Form, Header, HTTPException,
                      Query, Request, UploadFile, WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__, billing, db, pipeline, telegram
@@ -38,7 +39,7 @@ from .ling import srt as srt_mod
 from .ling import word as word_mod
 from .ling.romanizer import normalize_target as _ling_target, normalize_uzbek
 from .config import admin_secret, settings, webhook_secret
-from .flags import load as _flags_load, is_enabled as _flag_enabled, get_all as _flags_all, set_flag as _flag_set
+from .flags import load as _flags_load, get_all as _flags_all, set_flag as _flag_set
 from .pipeline import JOB_TYPES
 from .errors import ErrorCode
 from .notify import notify, NotifKind, maybe_notify_balance_low
@@ -1698,7 +1699,8 @@ def admin_status(request: Request) -> dict:
     total_minutes_spent = conn.execute(
         "SELECT COALESCE(SUM(ABS(delta)),0) FROM ledger WHERE delta < 0").fetchone()[0]
     sessions_active = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    import platform, sys
+    import platform
+    import sys
     return {
         "users": {"total": total_users, "new_today": new_today},
         "jobs": {"total": total_jobs, "active": active_jobs, "today": jobs_today,
@@ -2417,9 +2419,9 @@ async def ws_jobs(websocket: WebSocket, ticket: str = Query("")):
 
 
 # ---------- CORS (for future API consumers) ----------
-
-from fastapi.middleware.cors import CORSMiddleware
-
+# Registered last on purpose: Starlette runs middleware inside-out, so the
+# rate-limiter, the request-id and the security-header layers must stay outside
+# this one. The import itself lives with the other FastAPI imports at the top.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://web.telegram.org", "https://ovoz.app"],

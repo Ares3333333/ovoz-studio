@@ -19,7 +19,6 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from typing import Optional
 
 log = logging.getLogger("ovoz.webhooks")
 
