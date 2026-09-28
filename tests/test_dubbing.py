@@ -45,6 +45,16 @@ def _dur(path: Path) -> tuple[float, int, int]:
         return w.getnframes() / w.getframerate(), w.getframerate(), w.getnchannels()
 
 
+def _bulk_wav(path: Path, frames: int, rate: int = RATE) -> None:
+    """A mono-16 WAV of exactly `frames` samples, written without a per-sample loop
+    (so a test can produce a 100-second voice in a heartbeat)."""
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x20" * frames)   # constant 8192 amplitude
+
+
 # ─── the pure scheduler: where does each voice stand ─────────────────────────
 
 BIG = 1e9    # a cap that never binds, for the scheduling tests
@@ -231,3 +241,45 @@ def test_dubbing_artifact_reports_no_filesystem_path(client, auth, monkeypatch):
     assert str(jid) in blob                   # the id legitimately appears
     assert "dubbing.wav" not in blob          # the on-disk filename does not
     assert "line_" not in blob                # nor a per-line temp name
+
+
+class _RunawayVoice:
+    """One cue, one voice ~100 s long: it starts on its own cue (so nothing shifts),
+    but its head blows past the paid ceiling. This is the case the round-27-style
+    `if shifted:` gate would have stayed silent about."""
+    name = "fake-runaway"
+
+    def synthesize(self, text, lang, out_path, dur_sec):
+        _bulk_wav(Path(out_path), 100 * RATE)
+
+
+SRT_1_LINE = "1\n00:00:00,000 --> 00:00:01,000\nOdin\n\n"
+
+
+def test_a_clipped_but_unshifted_dub_still_reports(client, auth, monkeypatch):
+    """The commit promises 'any tail past the cap is reported, not silently dropped'.
+    A single huge voice moves nobody (shifted = 0) yet is clipped — the report gate
+    must fire on `clipped` too, or the flagship promise is unmet for exactly the
+    one-line dub a real provider makes easy."""
+    monkeypatch.setattr(pipeline, "get_tts", lambda: _RunawayVoice())
+    r = _upload_srt(client, auth, SRT_1_LINE)
+    assert r.status_code == 201, r.text
+    jid = r.json()["job"]["id"]
+    wav = client.get(r.json()["job"]["artifacts"]["dubbing"], headers=auth).content
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        dur = w.getnframes() / w.getframerate()
+    timeline = client.get(f"/api/jobs/{jid}", headers=auth).json()["timeline"]
+    events = " | ".join(e.get("message", "") for e in timeline)
+    assert dur < 70, f"ceiling not applied: {dur:.1f}s"       # capped at 2*1s + 60 slack
+    assert "clip" in events, f"silent truncation: {events}"
+
+
+def test_dubbing_leaves_no_per_line_temp_files(client, auth, monkeypatch):
+    """The disk-backed two-pass keeps peak RAM to one voice by writing one temp file
+    per line; those scratch files must not survive the job into the artifacts dir,
+    which is also what a customer can download around."""
+    monkeypatch.setattr(pipeline, "get_tts", lambda: _OverrunVoice())
+    r = _upload_srt(client, auth, SRT_3_LINES)
+    jid = r.json()["job"]["id"]
+    leftovers = [p.name for p in pipeline._art_dir(jid).glob("line_*.wav")]
+    assert not leftovers, f"temp voices leaked: {leftovers}"

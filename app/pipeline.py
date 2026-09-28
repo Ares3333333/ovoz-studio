@@ -788,7 +788,7 @@ def _execute(job: dict, deadline: float = 0) -> None:
         # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
         # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую
         # нарезку. Числа финитные; путь файла наружу не идёт.
-        if rep["shifted"]:
+        if rep["shifted"] or rep["clipped"]:
             note = (f"retimed: {rep['shifted']} of {rep['lines']} voices moved so none "
                     f"overlap (drift {rep['drift_sec']:.1f}s, total {rep['total_sec']:.1f}s)")
             if rep["clipped"]:
@@ -826,38 +826,46 @@ def _dub_schedule(segments: list[Segment], actuals: list[float],
 
 def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) -> dict:
     rate = 22050
-    # Сначала слушаем каждую реплика: буфер нельзя размерять по max(s.end), когда
-    # реальный голос длиннее окна, — иначе хвост молча обрезается (break в микшере).
-    voices: list[bytes] = []
+    # Два прохода, но НЕ удержанием всех голосов в памяти: первый проход измеряет
+    # реальную длительность каждой реплики и оставляет PCM на диске (по одному
+    # файлу на реплику), второй — перечитывает и подмешивает по одному файлу. Пик памяти —
+    # O(одна строка), как в прежнем inline-микшере: cap ограничивает выходной буфер,
+    # а этот приём не даёт входному накоплению стать тем, что съест RAM.
+    tmps: list[Path] = []
     actuals: list[float] = []
-    for s in translated:
-        tmp = art / f"line_{int(s.start * 1000)}.wav"
-        tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start)
-        _ensure_wav(tmp)  # now guarantees 22050 mono 16-bit PCM
-        with wave.open(str(tmp), "rb") as w:
-            data = w.readframes(w.getnframes())
-            sr = w.getframerate()
-        # _ensure_wav привёл к 22050; длительность считаем по фреймам и rate.
-        actuals.append(len(data) / 2.0 / (sr or rate))
-        voices.append(data)
-        tmp.unlink(missing_ok=True)
+    try:
+        for idx, s in enumerate(translated):
+            tmp = art / f"line_{idx}_{int(s.start * 1000)}.wav"
+            tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start)
+            _ensure_wav(tmp)  # now guarantees 22050 mono 16-bit PCM
+            with wave.open(str(tmp), "rb") as w:
+                sr = w.getframerate() or rate
+                actuals.append(w.getnframes() / sr)
+            tmps.append(tmp)
 
-    span = max((s.end for s in translated), default=1.0)
-    # Потолок памяти: даб может раздвинуться, но не безобразно. Вдвое длиннее
-    # оплаченной ленты + запас — это всё, что микшер выделит.
-    cap_sec = span * 2.0 + TIMELINE_SLACK_SEC
-    starts, total, clipped = _dub_schedule(translated, actuals, cap_sec)
-    samples = bytearray(int(total * rate) * 2)  # 16-bit mono
-    for start, data in zip(starts, voices):
-        offset = int(start * rate) * 2
-        for i in range(0, len(data) - 1, 2):
-            pos = offset + i
-            if pos + 1 >= len(samples):
-                break
-            cur = int.from_bytes(samples[pos:pos + 2], "little", signed=True)
-            add = int.from_bytes(data[i:i + 2], "little", signed=True)
-            mixed = max(-32768, min(32767, cur + add))
-            samples[pos:pos + 2] = mixed.to_bytes(2, "little", signed=True)
+        span = max((s.end for s in translated), default=1.0)
+        # Потолок памяти: даб может раздвинуться, но не безобразно. Вдвое длиннее
+        # оплаченной ленты + запас — это всё, что микшер выделит.
+        cap_sec = span * 2.0 + TIMELINE_SLACK_SEC
+        starts, total, clipped = _dub_schedule(translated, actuals, cap_sec)
+        samples = bytearray(int(total * rate) * 2)  # 16-bit mono
+        for start, tmp in zip(starts, tmps):
+            offset = int(start * rate) * 2
+            if offset >= len(samples):
+                continue                        # весь голос за потолком — тишина
+            with wave.open(str(tmp), "rb") as w:
+                data = w.readframes(w.getnframes())
+            for i in range(0, len(data) - 1, 2):
+                pos = offset + i
+                if pos + 1 >= len(samples):
+                    break
+                cur = int.from_bytes(samples[pos:pos + 2], "little", signed=True)
+                add = int.from_bytes(data[i:i + 2], "little", signed=True)
+                mixed = max(-32768, min(32767, cur + add))
+                samples[pos:pos + 2] = mixed.to_bytes(2, "little", signed=True)
+    finally:
+        for tmp in tmps:
+            tmp.unlink(missing_ok=True)         # temp-файлы не переживают job
 
     out = art / "dubbing.wav"
     with wave.open(str(out), "w") as w:
