@@ -35,15 +35,19 @@ The contract, held by tests:
   * **every number is finite** — this report is served raw as an artifact;
   * **determinism** — the same tape and the same cues give a byte-identical
     report. Nothing here reads a clock or a random number.
+  * **length is not a reason to refuse** — a tape longer than one block is timed
+    through `words_blocks`, and the word boundaries come out where `words` would
+    have put them: one curve, one gate, one algorithm, whether the samples arrived
+    in one piece or in a hundred.
 """
 from __future__ import annotations
 
 import math
 import re
 
-from .align import (MAX_CUES, MAX_LISTEN_SEC, MIN_SAMPLES, RATE_MAX, RATE_MIN,
-                   AlignError, check_listen_window, frame_curve, pcm_from_wav,
-                   speech_runs)
+from .align import (BLOCK_SEC_MAX, MAX_CUES, MAX_LISTEN_SEC, MIN_SAMPLES,
+                    RATE_MAX, RATE_MIN, AlignError, Envelope, check_listen_window,
+                    frame_curve, pcm_from_wav, speech_runs)
 from .srt import Cue
 
 # ─── the law, as numbers ───────────────────────────────────────────────────────
@@ -62,7 +66,8 @@ _APOSTROPHE = "ʻʼ’'‘`"
 
 _WORD_RE = re.compile(r"\S+")
 
-__all__ = ["WordError", "words", "weights", "to_vtt", "to_ass", "pcm_from_wav"]
+__all__ = ["WordError", "words", "words_curve", "words_blocks", "weights",
+           "to_vtt", "to_ass", "pcm_from_wav"]
 
 
 class WordError(AlignError):
@@ -213,8 +218,14 @@ def _dip(lo: int, hi: int, target: int, levels: list[float],
 
 # ─── the engine ────────────────────────────────────────────────────────────────
 
-def words(pcm, rate: int, cues: list[Cue]) -> dict:
-    """Time every word of every cue against the tape that carries it."""
+def _check_cues(cues, rate, n: int | None) -> None:
+    """Everything So'z refuses before it measures: the request's own shape, then
+    the tape's size. Refusing after the envelope pass would charge a customer for
+    a listening nobody asked for and no answer ever used.
+
+    `n` is the length of the tape in samples, or None when the tape is still
+    arriving in blocks — then the length check belongs at the end of the pass, not
+    here, and pretending otherwise would refuse every long recording as empty."""
     if not cues:
         raise WordError("no cues to time", "no_cues")
     if len(cues) > MAX_CUES:
@@ -222,26 +233,54 @@ def words(pcm, rate: int, cues: list[Cue]) -> dict:
                         "too_many_cues")
     counted = sum(len(_WORD_RE.findall(c.text or "")) for c in cues)
     if counted > MAX_WORDS:
-        # Refused before a single frame is read: this engine searches a window of
-        # frames per cut, so the number of words — not the length of the tape —
-        # bounds what an anonymous call can cost the CPU.
+        # CPU budget: every cut searches a window of frames, so the number of
+        # words — not the length of the tape — bounds what an anonymous call costs.
         raise WordError(f"too many words ({counted}, max {MAX_WORDS})",
                         "too_many_words")
     if rate is None or not isinstance(rate, int) or not RATE_MIN <= rate <= RATE_MAX:
         raise WordError(f"sample rate must be an integer {RATE_MIN}-{RATE_MAX} Hz",
                         "bad_rate")
-    n = len(pcm)
-    if n < MIN_SAMPLES:
+    if n is not None and n < MIN_SAMPLES:
         raise WordError(f"audio shorter than {MIN_SAMPLES} samples cannot be "
                         f"measured", "too_short")
+
+
+def words(pcm, rate: int, cues: list[Cue]) -> dict:
+    """Time every word of every cue against the tape that carries it.
+
+    The one-call shape of `words_curve`, for a recording held whole in memory."""
+    n = len(pcm)
+    _check_cues(cues, rate, n)
     # The same window Jimlik reads, from the same function: two listeners with two
     # ceilings would mean a job gets cue edges for a tape its word timings were
     # refused for, and nobody downstream could explain the difference. Refused as a
     # WordError, so a caller that only catches this engine's error still hears about
     # the window.
     check_listen_window(n, rate, err=WordError)
+    return words_curve(cues, frame_curve(pcm, rate))
 
-    curve = frame_curve(pcm, rate)
+
+def words_blocks(blocks, rate: int, cues: list[Cue],
+                 block_sec: float = BLOCK_SEC_MAX) -> dict:
+    """The same word timings over a tape that arrives in blocks — an hour of audio,
+    one block in hand at a time.
+
+    No second algorithm: the blocks build one curve and `words_curve` cannot tell
+    the difference, which is the only reason a word boundary past the old window is
+    trustworthy. The gate still comes from the whole tape, so the first act and the
+    last act are measured against the same room tone."""
+    _check_cues(cues, rate, None)
+    env = Envelope(rate, block_sec)
+    for b in blocks:
+        env.feed(b)
+    if env.samples < MIN_SAMPLES:
+        raise WordError(f"audio shorter than {MIN_SAMPLES} samples cannot be "
+                        f"measured", "too_short")
+    return words_curve(cues, env.curve())
+
+
+def words_curve(cues: list[Cue], curve: dict) -> dict:
+    """Time every word against a curve the caller has already measured."""
     runs = speech_runs(curve)
     if curve["silent_tape"] or not runs:
         # Nothing to hear: timing words off geometry alone would sell the customer
@@ -335,6 +374,12 @@ def words(pcm, rate: int, cues: list[Cue]) -> dict:
         "audio": {"duration": round(duration, 3), "frames": len(levels),
                   "frame_ms": round(frame_s * 1000.0, 3),
                   "window_sec": MAX_LISTEN_SEC,
+                  # The same honesty Jimlik reports: how much of the tape this
+                  # answer actually heard, and in how many pieces.
+                  "heard_sec": round(duration, 3),
+                  "blocks": curve.get("blocks", 1),
+                  "block_sec": round(curve.get("block_sec", MAX_LISTEN_SEC), 3),
+                  "streamed": "blocks" in curve,
                   "speech_runs": len(runs),
                   "speech_sec": round(sum((e - s + 1) * frame_s for s, e in runs), 3)},
         "tuning": {"min_word_sec": MIN_WORD_SEC, "search_ms": SEARCH_MS,

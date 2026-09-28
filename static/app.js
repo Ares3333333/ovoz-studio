@@ -1240,6 +1240,24 @@ function stepLines(ev) {
     return [tf("st_words_ok", { a: d.words, b: d.cues_measured, c: d.cues,
                                d: Math.round(d.valley_share * 100) })].concat(trunc);
   }
+  // The transcript is the one step a customer cannot verify by eye, so its number
+  // belongs on the card — and when the text was invented by a demo provider, the
+  // report says that in words instead of leaving the count to look like work.
+  if (d.code === "transcribed") {
+    return [tf("st_asr_ok", { a: d.segments })];
+  }
+  if (d.code === "demo_transcript") {
+    return [tf("st_asr_demo", { a: d.segments })];
+  }
+  // Speaker counts are measurements too, and a measurement without its scope is a
+  // claim: how much of the tape was heard, and how many cues were not on it.
+  if (d.code === "turns") {
+    return [tf("st_turns", { a: d.speakers, b: d.turns,
+                            c: fmtNum(d.heard_sec), d: d.off_tape })].concat(trunc);
+  }
+  if (d.code === "turns_text") {
+    return [tf("st_turns_text", { a: d.speakers, b: d.turns })];
+  }
   return null;
 }
 

@@ -495,34 +495,33 @@ def test_both_listeners_hear_the_same_window():
     assert exc.value.code == "too_long"
 
 
-def test_the_pipeline_decodes_strictly_inside_the_window_it_derives():
-    """`int(MAX_LISTEN_SEC)` looked structurally safe and was not: ffmpeg writes
-    whole blocks, so decoding exactly to the boundary can hand the listener one
-    frame more than it agreed to read — and the job that bought precisely the
-    window would lose *both* paid options to `too_long`.
+def test_the_pipeline_listens_to_the_money_and_not_to_a_window():
+    """Round 19 moved the ceiling from 200 s to 900 s and called it the engine's
+    window; Round 25 removed the ceiling as a limit at all: what bounds the
+    listening is what the job paid for, and only an hour of tape stays as a stop.
 
-    The margin is also what `_listen_slice` compares against, so a job whose tape
-    was cut by the decoder still says so: assert both halves of that contract."""
+    The margin law survives in a different unit. `ffmpeg` writes whole blocks, so
+    decoding exactly to the boundary can hand the listener a frame more than it
+    agreed to read — harmless here, because nothing is refused any more; what must
+    not drift is the *promise*: paid seconds, not internal slack, decide whether the
+    job says "not all of it was heard"."""
     from app import pipeline
-    assert pipeline.DIAR_MAX_ANALYZE_SEC < A.MAX_LISTEN_SEC
-    assert A.MAX_LISTEN_SEC - pipeline.DIAR_MAX_ANALYZE_SEC <= 15, \
-        "a generous margin is the old 200-second bug wearing a new number"
-    assert pipeline.DIAR_MAX_ANALYZE_SEC * RATE < A.MAX_LISTEN_SAMPLES
-    # The decoder's tape is shorter than the engine window, so the honesty note
-    # must key off the decoder: this is the case the note exists for. The fixture
-    # only builds whole blocks, so take the decoder's exact length by truncating.
-    cut = long_tape(900)[:pipeline.DIAR_MAX_ANALYZE_SEC * RATE]
-    assert len(cut) / RATE == pipeline.DIAR_MAX_ANALYZE_SEC
-    ceiling, note, trunc = pipeline._listen_slice(cut, 20.0)
-    assert ceiling == len(cut)
-    assert f"heard {pipeline.DIAR_MAX_ANALYZE_SEC}s of 1200s" in note, note
-    # The sentence is for logs; the client builds three localised UIs out of data.
-    assert trunc == {"heard_sec": pipeline.DIAR_MAX_ANALYZE_SEC,
-                     "paid_sec": 1200, "window_sec": int(A.MAX_LISTEN_SEC)}, trunc
-    # A recording that simply ran out before the window is not a lost promise:
-    # everything the client sent was heard, so nothing is claimed.
-    quiet = pipeline._listen_slice(long_tape(840), 20.0)
-    assert quiet[1] == "" and quiet[2] == {}
+    want, paid = pipeline._heard_budget(20.0)
+    assert (paid, want) == (1200.0, 1260.0), "paid timeline plus the slack, not the tape"
+    assert pipeline._heard_budget(0.0) == (66.0, 6.0)
+    # An hour bought: the stop is the job ceiling, and the ceiling is a memory
+    # decision, not the engine refusing to listen.
+    assert pipeline._heard_budget(120.0) == (pipeline.MAX_JOB_TAPE_SEC, 7200.0)
+    assert pipeline.MAX_JOB_TAPE_SEC > A.MAX_LISTEN_SEC, \
+        "the ceiling is still the engine's window wearing a new number"
+    assert pipeline.LISTEN_BLOCK_SEC <= A.BLOCK_SEC_MAX, \
+        "a block the envelope would refuse is a job that dies mid-tape"
+    # The honesty note keys off the ceiling, and only when paid time was lost.
+    trunc, note = pipeline._heard_report(3600.0, 3600.0, 7200.0)
+    assert trunc == {"heard_sec": 3600, "paid_sec": 7200, "window_sec": 3600}, trunc
+    assert "heard 3600s of 7200s" in note, note
+    assert pipeline._heard_report(600.0, 660.0, 1200.0) == ({}, ""), \
+        "a tape that simply ran out is not a lost promise"
 
 
 def test_a_frame_is_measured_from_every_sample_of_it():
@@ -557,30 +556,37 @@ def test_an_8_bit_tape_is_scaled_sample_for_sample():
     assert all(v % 256 == 0 for v in pcm), "not an 8-bit scale"
 
 
-def test_a_job_event_says_what_was_heard_when_the_window_ended_first():
-    """`_listen_slice` returns the sentence; only the steps can *say* it. A test on
+def test_a_job_event_says_what_was_heard_when_the_ceiling_ended_first(monkeypatch):
+    """`_heard_report` returns the sentence; only the steps can *say* it. A test on
     the helper alone stays green when someone drops `{note}` from both f-strings,
-    which is precisely the silent loss this release was written against."""
+    which is precisely the silent loss this release was written against.
+
+    The ceiling is shrunk for the test rather than the tape grown to an hour: the
+    numbers the event carries are produced by the same code either way, and a
+    58 MB fixture would test memory, not honesty."""
     from app import db, pipeline
+    from audio_studio import listening
+    monkeypatch.setattr(pipeline, "MAX_JOB_TAPE_SEC", 120.0)
     uid = db.create_user("N", "+99890n00001")["id"]
     job = db.create_job(uid, "subtitles", "uz", "ru", 20.0, "x.srt", {})
-    tape900 = long_tape(900)
-    segs = [pipeline.Segment(c.start, c.end, c.text) for c in block_cues(900)]
-    out = pipeline._align_step(job["id"], tape900, segs, 20.0)
+    segs = [pipeline.Segment(c.start, c.end, c.text) for c in block_cues(120)]
+    tape = listening(long_tape(900), segs, 20.0)
+    assert tape["heard_sec"] == 120.0 and tape["blocks"] == 2, tape["heard_sec"]
+    out = pipeline._align_step(job["id"], tape, segs)
     line = [e for e in db.job_timeline(job["id"]) if e["step"] == "align"][-1]
-    assert "heard 900s of 1200s" in line["message"], line
+    assert "heard 120s of 1200s" in line["message"], line
     assert len(out) == len(segs)
     # The same facts as data: the card renders these, not the English sentence.
     data = line["data"]
-    assert data["code"] == "aligned" and data["moved"] == data["boundaries"] == 300, data
-    assert data["max_applied"] == 0.18 and data["duration"] == 900.0, data
-    assert data["truncation"] == {"heard_sec": 900, "paid_sec": 1200,
-                                  "window_sec": 900}, data
-    pipeline._words_step(job["id"], tape900, block_cues(900), 20.0)
+    assert data["code"] == "aligned" and data["moved"] == data["boundaries"] == 40, data
+    assert data["max_applied"] == 0.18 and data["duration"] == 120.0, data
+    assert data["truncation"] == {"heard_sec": 120, "paid_sec": 1200,
+                                  "window_sec": 120}, data
+    pipeline._words_step(job["id"], tape, block_cues(120))
     wline = [e for e in db.job_timeline(job["id"]) if e["step"] == "words"][-1]
-    assert "heard 900s of 1200s" in wline["message"], wline
-    assert wline["data"]["code"] == "timed" and wline["data"]["words"] == 300, wline["data"]
-    assert wline["data"]["cues"] == wline["data"]["cues_measured"] == 150, wline["data"]
+    assert "heard 120s of 1200s" in wline["message"], wline
+    assert wline["data"]["code"] == "timed" and wline["data"]["words"] == 40, wline["data"]
+    assert wline["data"]["cues"] == wline["data"]["cues_measured"] == 20, wline["data"]
     assert wline["data"]["valley_share"] == 1.0, wline["data"]
     assert "truncation" in wline["data"], wline["data"]
 
@@ -595,13 +601,16 @@ def test_a_refused_step_says_why_in_a_token_not_in_prose(client, auth):
     assert line["data"] == {"code": "skipped", "reason": "no_audio"}, line
 
 
-def test_a_short_job_promises_nothing_it_did_not_run_out_of(client, auth):
+def test_a_short_job_promises_nothing_it_did_not_run_out_of(client, auth, monkeypatch):
     """The note is a claim about a limit, so it must be absent whenever the paid
-    timeline — not the window — is what stopped the listening."""
+    timeline — not the ceiling — is what stopped the listening."""
     from app import db, pipeline
+    from audio_studio import listening
     uid = db.create_user("S", "+99890s00002")["id"]
     job = db.create_job(uid, "subtitles", "uz", "ru", 1.0, "x.srt", {})
-    pipeline._align_step(job["id"], long_tape(60), block_cues(60), 1.0)
+    tape = listening(long_tape(60), block_cues(60), 1.0)
+    assert tape["truncation"] == {} and tape["note"] == "", tape
+    pipeline._align_step(job["id"], tape, block_cues(60))
     line = [e for e in db.job_timeline(job["id"]) if e["step"] == "align"][-1]
     assert "heard" not in line["message"], line
 
@@ -986,29 +995,34 @@ def test_the_aligner_is_advertised_where_sdks_look(client):
 
 # ─── the job pipeline ─────────────────────────────────────────────────────────
 
-def test_a_job_longer_than_the_window_says_which_part_was_heard():
-    """The honesty half of Round 19. Widening the window from 200 s to 900 s fixed
-    most jobs; it did not fix a long one, and a checkbox that aligns fifteen of
-    twenty minutes must say so instead of reporting success in silence.
+def test_the_listening_stops_where_the_money_stops_and_not_a_frame_later():
+    """`_drain` reads the tape in blocks and never past the ceiling it declared.
 
-    The note compares paid seconds with heard seconds — not the internal slack,
-    which is a buffer, not a promise."""
+    An unbounded read is how a ten-hour upload turns one paid job into a
+    machine-wide outage; a ceiling that also cuts paid material is the silent loss
+    Round 19 named. Both directions get asserted, because a test that only checks
+    one of them passes when someone "fixes" the other."""
     from app import pipeline
-    tape900 = long_tape(900)
-    assert len(tape900) / RATE == A.MAX_LISTEN_SEC
+    from audio_studio import listening
+    raw = long_tape(900).tobytes()
+    got: list[int] = []
+    pos = 0
 
-    ceiling, note, trunc = pipeline._listen_slice(tape900, 20.0)
-    assert ceiling == len(tape900), "the window sliced the tape it cannot hear anyway"
-    assert "heard 900s of 1200s" in note and "900s)" in note, note
-    assert trunc["heard_sec"] == 900 and trunc["paid_sec"] == 1200
+    def read(nbytes: int) -> bytes:
+        nonlocal pos
+        out = raw[pos:pos + nbytes]
+        got.append(len(out))
+        pos += len(out)
+        return out
 
-    # Paid exactly the window: the whole tape was heard, so nothing is claimed.
-    assert pipeline._listen_slice(tape900, 15.0)[1] == ""
-    assert pipeline._listen_slice(tape900, 15.0)[2] == {}
-    # A tape shorter than the credit was never truncated: silence is honest here.
-    assert pipeline._listen_slice(long_tape(60), 5.0)[1] == ""
-    # The paid timeline still bounds the slice exactly as before (Round 17).
-    assert pipeline._listen_slice(tape900, 1.0) == (int(120 * RATE), "", {})
+    tape = pipeline._drain(read, block_cues(900), 5.0)      # five minutes bought
+    assert tape["heard_sec"] == 360.0, tape["heard_sec"]    # paid plus the slack
+    assert tape["blocks"] == 360 / pipeline.LISTEN_BLOCK_SEC, tape["blocks"]
+    assert sum(got) / 2 / RATE <= 360.0 + 1e-9, "the pass read past its ceiling"
+    assert tape["truncation"] == {}, "a tape longer than the paid timeline is not a loss"
+    # A tape shorter than the credit was heard whole: silence is honest here.
+    short = listening(long_tape(120), block_cues(120), 20.0)
+    assert short["heard_sec"] == 120.0 and short["truncation"] == {}, short
 
 
 def _submit(client, auth, align=None, jtype="subtitles"):
@@ -1072,24 +1086,24 @@ def test_a_text_job_without_the_flag_is_never_retimed(client, auth):
     assert {e["step"] for e in db.job_timeline(job["id"])}.isdisjoint({"align"})
 
 
-def test_one_decoding_of_the_tape_serves_every_engine_that_listens(client, auth, monkeypatch):
-    """Align and diarize both hear the same audio; they must not each queue their
-    own ffmpeg.
+def test_one_listening_of_the_tape_serves_every_engine_that_hears(client, auth, monkeypatch):
+    """Align, diarize and words all hear the same audio; they must not each queue
+    their own ffmpeg.
 
-    Decoding per feature is not merely slower, it is two windows over the same
-    job that can disagree: the aligner would retime cues against one rendition of
-    the tape while the diarizer profiled another, and the report would still claim
-    both are facts about the recording the customer uploaded."""
+    Decoding per feature is not merely slower, it is two windows over the same job
+    that can disagree: the aligner would retime cues against one rendition of the
+    tape while the diarizer profiled another, and the report would still claim both
+    are facts about the recording the customer uploaded."""
     from app import db, pipeline as pl
 
     seen = []
-    real = pl._pcm
+    real = pl._tape_pass
 
-    def counting(path):
-        seen.append(Path(path).name)
-        return real(path)
+    def counting(source, segments, billed, deadline=0.0):
+        seen.append(Path(source).name)
+        return real(source, segments, billed, deadline)
 
-    monkeypatch.setattr(pl, "_pcm", counting)
+    monkeypatch.setattr(pl, "_tape_pass", counting)
     r = client.post("/api/jobs", headers=auth,
                     files={"file": ("interview.srt", format_srt(CRUSHED).encode(),
                                     "text/plain")},
@@ -1104,16 +1118,19 @@ def test_one_decoding_of_the_tape_serves_every_engine_that_listens(client, auth,
 
 def test_no_pipeline_step_decodes_the_tape_on_the_side():
     """The behavioural test above can only see the flags it turns on together. This
-    one is the rule for every step that has not been written yet: audio reaches the
-    engines as the buffer `_execute` already holds, never as a fresh subprocess."""
+    one is the rule for every step that has not been written yet: the tape reaches
+    the engines as the pass `_execute` already ran, never as a fresh subprocess."""
     import inspect
 
     from app import pipeline as pl
 
     body = inspect.getsource(pl._execute)
-    calls = body.count("_pcm(")            # `_audio_pcm(` contains `_pcm(`
-    assert body.count("_audio_pcm(") == calls == 1, (
-        "_execute must decode through _audio_pcm exactly once and pass the buffer on")
+    assert body.count("_tape_pass(") == 1, \
+        "_execute must listen through _tape_pass exactly once and pass the result on"
+    for fn in (pl._execute, pl._align_step, pl._words_step):
+        step = inspect.getsource(fn)
+        for side in ("_pcm(", "Popen", "subprocess."):
+            assert side not in step, f"{fn.__name__} decodes the tape on the side: {side}"
 
 
 # ─── static gates: there is no JS test runner, so these are the tests ─────────
@@ -1265,4 +1282,166 @@ def test_the_browser_encoder_writes_a_header_the_engine_accepts():
     rep = A.align(pcm, rate, [Cue(1, 0.0, 1.2, "Salom."),
                               Cue(2, 1.6, 2.4, "Qalaysiz.")])
     assert rep["audio"]["gaps"] >= 1
+
+
+# ─── Round 25: «Ovoz Qayta» — слушать ленту длиннее одного окна ───────────────
+# English is the language of these files, so the header above is the only Russian
+# line here on purpose: it names the release the reader is standing in.
+
+def blocks_of(pcm, size_samples: int):
+    """The same bytes, arriving as a pipe would: fixed-size blocks, last one short."""
+    raw = pcm.tobytes() if isinstance(pcm, array) else bytes(pcm)
+    step = max(2, size_samples * 2)
+    for off in range(0, len(raw), step):
+        yield raw[off:off + step]
+
+
+def _env_of(pcm, size_samples: int, block_sec: float) -> A.Envelope:
+    env = A.Envelope(RATE, block_sec)
+    for b in blocks_of(pcm, size_samples):
+        env.feed(b)
+    return env
+
+
+@pytest.mark.parametrize("size", [1_000, 3_999, 8_000, 8_001, 16_000, 60 * RATE])
+def test_a_tape_measured_in_blocks_is_the_same_tape(size):
+    """The frame sequence is a property of the recording, not of the reader.
+
+    Blocks are a memory shape. If the envelope depended on where a block ended, the
+    gate would move between two runs of the same job on two different machines and
+    every claim about determinism in this repository would be decoration."""
+    src = long_tape(60)
+    one = A.frame_curve(src, RATE)
+    got = _env_of(src, size, min(A.BLOCK_SEC_MAX, max(1.0, size / RATE))).curve()
+    assert got["levels"] == one["levels"], f"block {size} measured different frames"
+    assert got["gate_db"] == one["gate_db"] and got["duration"] == one["duration"]
+    assert got["noise_floor"] == one["noise_floor"]
+
+
+def test_a_half_sample_byte_is_neither_dropped_nor_invented():
+    """A pipe hands over what it has: an odd byte count is normal, and the sample it
+    belongs to is not a sample until its partner arrives. Carry it, or the next
+    block reads every frame out of alignment by one byte."""
+    src = array("h", [0] * 7 + [12000] * 400 + [0] * 3)
+    raw = src.tobytes() + b"\x7f"                # a trailing half sample
+    env = A.Envelope(RATE, 1.0)
+    env.feed(raw[:501])                          # odd split: mid-sample
+    env.feed(raw[501:])
+    whole = A.frame_curve(src, RATE)
+    assert env.samples == len(src), "a half sample was counted as a whole one"
+    assert env.curve()["levels"] == whole["levels"]
+
+
+def test_aligning_a_tape_in_blocks_equals_aligning_it_at_all():
+    """Not the curve but the ANSWER: same cues, same pauses, byte-identical report,
+    with `blocks` the only field allowed to say how the tape was heard.
+
+    This is the test that makes "we listened to all of it" more than a second code
+    path wearing the first one's name."""
+    src, cues = long_tape(60), block_cues(60)
+    whole = A.align(src, RATE, cues)
+    streamed = A.align_blocks(blocks_of(src, 5_000), RATE, cues)
+    assert {k: v for k, v in streamed.items() if k != "audio"} == \
+           {k: v for k, v in whole.items() if k != "audio"}
+    assert whole["audio"]["streamed"] is False and streamed["audio"]["streamed"] is True
+    assert streamed["audio"]["blocks"] > 1 and streamed["audio"]["heard_sec"] == 60.0
+    assert streamed["srt"] == whole["srt"]
+
+
+def test_a_cut_at_minute_nineteen_lands_on_a_real_pause():
+    """The customer-visible claim of the release. A twenty-minute tape used to get
+    either a refusal or fifteen minutes of work and a checkbox; here a cue planted
+    in the last block is moved onto the pause that is really under it. Nothing is
+    stubbed — the engine listens to the whole tape."""
+    src = long_tape(1200)
+    cues = block_cues(1200)[-3:]
+    rep = A.align_blocks(blocks_of(src, 60 * RATE), RATE, cues)
+    assert rep["audio"]["heard_sec"] == 1200.0, rep["audio"]
+    assert rep["summary"]["moved"] == 2 * len(cues), rep["summary"]
+    assert all(m["shift"] <= 0.6 for m in rep["moves"]), rep["moves"]
+    assert rep["summary"]["never_worse"] and rep["summary"]["words_preserved"]
+    assert rep["summary"]["beyond_audio"] == 0
+
+
+def test_a_block_bigger_than_the_promised_window_is_refused():
+    """`block_sec` is the memory bound, so it has to be enforced and not documented:
+    a caller that promises one minute and hands over an hour is the reason a job
+    stops being a queue item and becomes an outage."""
+    env = A.Envelope(RATE, 1.0)
+    with pytest.raises(A.AlignError) as exc:
+        env.feed(array("h", [0] * (5 * RATE)).tobytes())
+    assert exc.value.code == "bad_block"
+    for bad in (0.0, 0.2, A.BLOCK_SEC_MAX + 1, float("nan"), "sixty"):
+        with pytest.raises(A.AlignError):
+            A.Envelope(RATE, bad)
+    with pytest.raises(A.AlignError) as rate_exc:
+        A.Envelope(400, 60.0)
+    assert rate_exc.value.code == "bad_rate"
+
+
+def test_the_pass_never_holds_more_tape_than_it_promised():
+    """`peak_samples` is not a statistic nobody reads: it is the number the hour-long
+    ceiling is priced against, measured on the pass itself."""
+    src = long_tape(120)
+    env = _env_of(src, 10 * RATE, 10.0)
+    assert env.peak_samples <= 10 * RATE + env.frame_len, env.peak_samples
+    assert env.samples == len(src) and env.blocks == 12
+
+
+def test_the_index_answers_exactly_what_the_sweep_answers():
+    """The pause index is what makes an hour affordable — 1500 cues sweeping 20 000
+    pauses is the cost that was refused on. It must not move a cut by one
+    millisecond, so both search strategies get asked the same questions on the same
+    gaps, and any difference is a bug rather than a trade-off."""
+    rnd = __import__("random").Random(20260928)
+    for _ in range(30):
+        pos, gaps = 0.0, []
+        while pos < 300.0:
+            start = pos + rnd.uniform(0.0, 0.4)
+            gaps.append(A.Gap(round(start, 3), round(start + rnd.uniform(0.05, 0.9), 3)))
+            pos = gaps[-1].end + rnd.uniform(0.1, 3.0)
+        idx = A._GapIndex.build(gaps)
+        assert idx is not None, "a legal pause list lost its index"
+        for _ in range(60):
+            t = rnd.uniform(0.0, 300.0)
+            low = max(0.0, t - rnd.uniform(0.0, 1.2))
+            high = t + rnd.uniform(0.0, 1.2)
+            shift = rnd.choice([0.05, 0.6, 2.0])
+            assert A.snap_one(t, gaps, shift, low, high, idx) == \
+                   A.snap_one(t, gaps, shift, low, high), (t, low, high, shift)
+
+
+def test_an_unsorted_pause_list_keeps_the_honest_sweep():
+    """The index assumes ascending, disjoint pauses. Given anything else it must not
+    exist at all: a wrong answer delivered fast is the one failure mode this
+    optimisation is not allowed to add."""
+    crossed = [A.Gap(5.0, 6.0), A.Gap(1.0, 2.0)]
+    assert A._GapIndex.build(crossed) is None
+    touching = [A.Gap(1.0, 4.0), A.Gap(3.0, 6.0)]
+    assert A._GapIndex.build(touching) is None
+    assert A._GapIndex.build([]) is None
+
+
+def test_the_report_is_identical_with_the_index_switched_off(monkeypatch):
+    """End to end, on a real interview tape: force the sweep and compare whole
+    reports, so an equivalence proven per-boundary cannot hide a cue-level
+    interaction (the collapse undo reads pauses too)."""
+    src, cues = interview(tone=120), [Cue(1, 0.20, 0.85, "bir"), Cue(2, 1.10, 1.90, "ikki"),
+                                      Cue(3, 2.05, 3.10, "uch")]
+    fast = A.align(src, RATE, cues)
+    monkeypatch.setattr(A._GapIndex, "build", classmethod(lambda cls, gaps: None))
+    slow = A.align(src, RATE, cues)
+    assert fast == slow
+
+
+def test_a_deadline_between_blocks_wakes_the_job_instead_of_losing_it():
+    """`_drain` checks the wall clock where a hung ffmpeg would otherwise sit: a
+    cooperative timeout that never regains control is not a timeout."""
+    from app import pipeline as pl
+
+    def endless(nbytes: int) -> bytes:
+        return b"\x00" * nbytes
+
+    with pytest.raises(TimeoutError):
+        pl._drain(endless, block_cues(600), 10.0, deadline=time.monotonic() - 1.0)
 

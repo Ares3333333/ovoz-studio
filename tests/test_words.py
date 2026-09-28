@@ -620,10 +620,11 @@ def test_the_step_writes_a_report_and_a_karaoke_track(client, auth, tmp_path):
     was found, the ASS is what a player burns in. The plain subtitle track must
     stay plain — \kf tags in a player that ignores them are still tags."""
     from app import db, pipeline
+    from audio_studio import listening
     uid = db.create_user("W", "+99890w0000")["id"]
     job = db.create_job(uid, "subtitles", "uz", "ru", 1.0, "x.srt", {})
     cues = [Cue(i + 1, c.start, c.end, c.text) for i, c in enumerate(ONE_LINE)]
-    pipeline._words_step(job["id"], PHRASE, cues, 1.0)
+    pipeline._words_step(job["id"], listening(PHRASE, cues, 1.0), cues)
     arts = {k: Path(p) for k, p in
             ((k, db.get_artifact(job["id"], k)) for k in ("words", "ass_karaoke"))}
     assert all(p and p.exists() for p in arts.values()), arts

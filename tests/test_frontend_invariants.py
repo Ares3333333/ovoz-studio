@@ -900,6 +900,48 @@ def test_the_engine_report_is_rendered_from_data_and_not_from_the_log_line():
         "list and detail must offer the same options as one helper"
 
 
+def test_every_engine_code_the_pipeline_writes_is_rendered_and_translated():
+    """`skipped` has a fallback template; a success code has nothing.
+
+    `stepLines` returns null for a code it does not know, which renders no row at
+    all — so the day the pipeline starts writing a number without a client branch,
+    the paid option silently disappears from the report instead of failing. Derived
+    from both sides' own text: the codes the server writes, the branches the client
+    has, the keys all three locales carry."""
+    from test_i18n_completeness import dictionaries
+    pipe = (STATIC.parent / "app" / "pipeline.py").read_text(encoding="utf-8")
+    codes = set(re.findall(r'"code":\s*"([a-z_]+)"', pipe)) - {"skipped"}
+    # A code picked by a conditional is two codes, and a scan that sees only the
+    # first half would let the other half ship without a row.
+    for other in re.findall(r'"code":\s*"[a-z_]+"[^,}]*else "([a-z_]+)"', pipe):
+        codes.add(other)
+    assert {"aligned", "timed", "turns", "turns_text"} <= codes, codes
+    body = JS[JS.index("function stepLines(ev)"):JS.index("function renderSteps(")]
+    unrendered = {c for c in codes if f'd.code === "{c}"' not in body}
+    assert not unrendered, f"stepLines silently drops these engine codes: {sorted(unrendered)}"
+    used = set(re.findall(r'tf\("(st_[a-z_]+)"', body)) - {"st_skip_generic"}
+    for lang, keys in dictionaries().items():
+        missing = used - set(keys)
+        assert not missing, f"{lang} cannot paint these report lines: {sorted(missing)}"
+
+
+def test_the_job_listens_to_the_whole_tape_it_paid_for():
+    """The window that refuses a tape is the one an anonymous caller may not push
+    past. A job has already paid, been throttled and been size-checked, so routing
+    it through the single-shot entry would let it hit `too_long` — the refusal that
+    quietly drops both paid listening options.
+
+    Textual because the case cannot be raised in a test double: it needs a real
+    tape longer than fifteen minutes, and the bug it prevents is a job that finishes
+    `done` with two steps skipped for a limit the customer never agreed to."""
+    pipe = (STATIC.parent / "app" / "pipeline.py").read_text(encoding="utf-8")
+    assert "align_mod.align_curve(" in pipe and "word_mod.words_curve(" in pipe
+    for single_shot in ("align_mod.align(", "word_mod.words("):
+        assert single_shot not in pipe, f"the job re-meets the anonymous window: {single_shot}"
+    assert "check_listen_window" not in pipe, \
+        "the pipeline is refusing its own customers"
+
+
 def test_the_cut_ruler_is_wired_to_the_sixth_engine():
     """The widget is the only place this law becomes visible to a person who will
     never read the API. Everything the ruler paints must come from codes and

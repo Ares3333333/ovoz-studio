@@ -40,6 +40,7 @@ The contract, held by tests:
 """
 from __future__ import annotations
 
+import bisect
 import io
 import math
 import wave
@@ -88,6 +89,13 @@ CHANNELS_MAX = 8
 # about half a second. A ceiling that buys nothing is not a ceiling, it is a bug.
 MAX_LISTEN_SEC = 900.0          # fifteen minutes of tape: what a listener reads
 MAX_LISTEN_SAMPLES = 9_600_000  # memory: the same window up to 16 kHz
+# A tape longer than one window is not refused any more: it is measured in blocks.
+# `Envelope` holds one block of samples at a time and hands the engines one curve
+# for the whole tape, so this number is now a *memory* knob, not a reach limit —
+# the reach limit for an anonymous caller is still `MAX_LISTEN_SEC`, enforced in
+# `check_listen_window`, and the smallest block anyone may claim is one second.
+BLOCK_SEC_MAX = MAX_LISTEN_SEC
+MIN_BLOCK_SEC = 1.0
 # The library's own ceiling, sized for the pipeline's longest legal job. The public
 # endpoint is far stricter (`_LING_MAX_LINES`) because there the caller is anonymous;
 # a job already paid for must not be refused for a number that costs nothing extra.
@@ -269,21 +277,27 @@ def _db(x: float) -> float:
     return 20.0 * math.log10(max(x, 1e-9))
 
 
-def frame_curve(pcm, rate: int) -> dict:
-    """The tape as one listener hears it: an RMS pass and the gate derived from
-    *this* recording alone.
+def curve_from(levels: list, frame_len: int, rate: int,
+               samples: int | None = None) -> dict:
+    """The gate for a tape that has already been measured into frame levels.
 
-    Jimlik asks where speech stops; So'z asks where each word sits inside a line.
-    Two engines reading two different envelopes would produce two incompatible
-    stories about the same file — a word boundary landing in a frame the aligner
-    called speech is a bug nobody can reproduce. So the gate is computed once,
-    here, and shared. The clamping order is load-bearing: on a tape with no
-    dynamics `floor + 6 dB` sits *above* the speaking level, and a gate up there
-    cuts speech into confetti."""
-    frame_len = max(1, round(rate * FRAME_MS / 1000.0))
-    levels = frame_levels(pcm, frame_len)
+    Split out of `frame_curve` because the two jobs have different memory shapes:
+    turning samples into levels needs the samples in hand, deriving the gate needs
+    only the levels — fifty numbers per second of tape. A tape read in blocks
+    therefore arrives here exactly like a tape read in one go, and the gate it gets
+    is the same one: it is a percentile of the *levels*, never of a block, so a
+    quiet first act cannot make a loud last act read as a room tone.
+
+    The clamping order is load-bearing: on a tape with no dynamics `floor + 6 dB`
+    sits *above* the speaking level, and a gate up there cuts speech into confetti.
+    """
     if not levels:
         raise AlignError("audio shorter than one analysis frame", "too_short")
+    # `samples` is the length of the tape, not the length of the measurement: a
+    # trailing partial frame is not measured but it is still on the tape, and a
+    # duration that quietly drops it would move the end-of-tape wall under a cue
+    # that legitimately reaches the last millisecond.
+    duration = (len(levels) * frame_len if samples is None else samples) / rate
     ordered = sorted(levels)
     floor = _percentile(ordered, NOISE_FLOOR_PCT)
     top = _percentile(ordered, SPEECH_LEVEL_PCT)
@@ -297,7 +311,8 @@ def frame_curve(pcm, rate: int) -> dict:
         "levels": levels,
         "frame_len": frame_len,
         "frame_s": frame_len / rate,
-        "duration": len(pcm) / rate,
+        "sample_rate": rate,    # carried so a curve can be aligned without the tape
+        "duration": duration,
         "noise_floor": floor,
         "speech_level": hi,      # a frame at or above this is being spoken
         "hold_level": lo,        # and it stays speech until it falls below this
@@ -308,6 +323,21 @@ def frame_curve(pcm, rate: int) -> dict:
         # and a fabricated one.
         "silent_tape": s_db < MIN_SPEECH_DB,
     }
+
+
+def frame_curve(pcm, rate: int) -> dict:
+    """The tape as one listener hears it: an RMS pass and the gate derived from
+    *this* recording alone.
+
+    Jimlik asks where speech stops; So'z asks where each word sits inside a line.
+    Two engines reading two different envelopes would produce two incompatible
+    stories about the same file — a word boundary landing in a frame the aligner
+    called speech is a bug nobody can reproduce. So the gate is computed once,
+    here, and shared. A tape that does not fit in memory reaches the same function
+    through `Envelope` instead: one curve, whichever way the samples arrived.
+    """
+    frame_len = max(1, round(rate * FRAME_MS / 1000.0))
+    return curve_from(frame_levels(pcm, frame_len), frame_len, rate, len(pcm))
 
 
 def speech_runs(curve: dict) -> list[tuple[int, int]]:
@@ -334,14 +364,17 @@ def speech_runs(curve: dict) -> list[tuple[int, int]]:
     return runs
 
 
-def detect_gaps(pcm, rate: int) -> dict:
-    """Where the tape is quiet, measured from the tape itself.
+def gaps_from(curve: dict) -> dict:
+    """Where the tape is quiet, for a curve somebody already measured.
 
     Two thresholds, not one: frames at or above `hi` open speech, frames below
     `lo` close it, and anything in between keeps the previous state. A single
     threshold turns the tail of a decaying vowel into a dozen one-frame "pauses"
-    and the aligner then reports silence it never heard."""
-    curve = frame_curve(pcm, rate)
+    and the aligner then reports silence it never heard.
+
+    This is the whole listening step: past this point the engine reads *frames*,
+    never samples, which is why a tape of any length can be aligned from a pass
+    that held one block of it in hand."""
     levels, frame_s = curve["levels"], curve["frame_s"]
     hi, lo, floor = curve["speech_level"], curve["hold_level"], curve["noise_floor"]
     duration = curve["duration"]
@@ -380,6 +413,95 @@ def detect_gaps(pcm, rate: int) -> dict:
     }
 
 
+def detect_gaps(pcm, rate: int) -> dict:
+    """Where the tape is quiet, measured from the tape itself: the one-call shape
+    of `frame_curve` plus `gaps_from`, kept as the public reading entry point."""
+    return gaps_from(frame_curve(pcm, rate))
+
+
+class Envelope:
+    """The loudness pass over a tape that does not fit in memory.
+
+    `frame_curve` wants the whole recording as one object. That is honest — every
+    sample of every 20 ms frame is read — but it made a *memory* shape decide what
+    a customer could buy: an hour of 8 kHz mono is 57 MB of integers, so a job that
+    paid for an hour was refused by a limit nobody had voted for.
+
+    Hand this class blocks of samples instead. It keeps one block in hand, measures
+    whole frames out of it, and carries the partial frame into the next block, so
+    the sequence of frames — and therefore the curve, the gate and every pause — is
+    byte for byte what the single-shot pass would have produced. Two things make
+    that claim real rather than hopeful, and both are tested:
+
+      * a frame never gets split or skipped at a block edge, whatever the block size;
+      * `block_sec` is a promise the caller has to keep: a block bigger than the
+        window it declared is refused, so the bound on memory is enforced here
+        instead of being described here.
+    """
+
+    def __init__(self, rate: int, block_sec: float = BLOCK_SEC_MAX) -> None:
+        _check_rate(rate)
+        try:
+            want = float(block_sec)
+        except (TypeError, ValueError):
+            raise AlignError("block_sec must be a number of seconds", "bad_block")
+        if not math.isfinite(want) or not MIN_BLOCK_SEC <= want <= BLOCK_SEC_MAX:
+            raise AlignError(f"block must be between {MIN_BLOCK_SEC:g} and "
+                             f"{BLOCK_SEC_MAX:.0f} seconds", "bad_block")
+        self.rate = rate
+        self.frame_len = max(1, round(rate * FRAME_MS / 1000.0))
+        self.block_sec = want
+        self.samples = 0        # whole samples ever handed over
+        self.blocks = 0         # feeds that completed at least one frame
+        self.peak_samples = 0   # most samples ever in hand: the memory claim
+        self._carry = b""
+        self._levels: list[float] = []
+
+    def feed(self, block) -> int:
+        """Take the next slice of the tape. Returns the frames this slice completed."""
+        raw = block if isinstance(block, (bytes, bytearray, memoryview)) \
+            else block.tobytes()
+        carried = len(self._carry) // 2          # whole samples already counted
+        buf = self._carry + bytes(raw)
+        avail = len(buf) // 2                     # whole 16-bit samples in hand
+        # Only what arrived this time lengthens the tape. The carry is re-read on
+        # every feed because a frame has to be finished before it can be measured,
+        # and a duration that counted those samples twice would put the end-of-tape
+        # wall past the last millisecond the engine actually heard.
+        self.samples += avail - carried
+        if avail > self.peak_samples:
+            self.peak_samples = avail
+        if avail > int(self.block_sec * self.rate) + self.frame_len:
+            raise AlignError(
+                f"block of {avail / self.rate:.1f} s exceeds the {self.block_sec:.1f} s "
+                f"window this pass promised to hold", "bad_block")
+        done = avail // self.frame_len            # only whole frames get measured
+        cut = done * self.frame_len * 2
+        body, self._carry = buf[:cut], buf[cut:]
+        if not done:
+            return 0
+        self.blocks += 1
+        pcm = array("h")
+        pcm.frombytes(body)
+        fl, before = self.frame_len, len(self._levels)
+        append = self._levels.append
+        for a in range(0, len(pcm) - fl + 1, fl):
+            chunk = pcm[a:a + fl]
+            append(math.sqrt(sum(x * x for x in chunk) / fl) / FULL_SCALE)
+        return len(self._levels) - before
+
+    def curve(self) -> dict:
+        """The tape as one listener heard it — the same dict `frame_curve` returns.
+
+        Carries `blocks`, `block_sec` and `peak_samples` so a report can say how the
+        listening was done, not only what it found."""
+        out = curve_from(self._levels, self.frame_len, self.rate, self.samples)
+        out["blocks"] = self.blocks
+        out["block_sec"] = round(self.block_sec, 3)
+        out["peak_samples"] = self.peak_samples
+        return out
+
+
 # ─── the snap ─────────────────────────────────────────────────────────────────
 
 def _target(g: Gap, t: float, pad: float = BOUNDARY_PAD) -> tuple[float, float] | None:
@@ -397,7 +519,8 @@ def _in_gap(g: Gap, start: float, end: float) -> bool:
 
 
 def snap_one(t: float, gaps: list[Gap], max_shift: float,
-             low: float, high: float) -> tuple[float, Gap | None, bool]:
+             low: float, high: float, index: "_GapIndex | None" = None
+             ) -> tuple[float, Gap | None, bool]:
     """Nearest legal point of real silence for one boundary.
 
     `low`/`high` are the neighbours' claims on this moment, applied *before* the
@@ -406,12 +529,24 @@ def snap_one(t: float, gaps: list[Gap], max_shift: float,
     engine praising itself for an overlap it just created. The in-silence answer is
     still given when the window is empty — "this cut already sits in a pause, but
     its neighbour owns that moment" is a different fact from "this cut is on top of
-    a word", and the report must not flatten them."""
+    a word", and the report must not flatten them.
+
+    `index` narrows the pause list to the ones that can answer this moment, for
+    tapes long enough that sweeping all of them per boundary is the cost of the
+    job. It is an optimisation with a proof obligation, not a behaviour change:
+    `tests/test_align.py` compares the indexed answer with the sweep on the same
+    gaps, so a boundary that changes its mind is a test failure, not a mystery."""
     lo_w, hi_w = max(t - max_shift, low), min(t + max_shift, high)
     room = hi_w >= lo_w
     best_t, best_g, best_d = t, None, float("inf")
     in_place = False
-    for g in gaps:
+    if index is None:
+        span: tuple[int, int] = (0, len(gaps))
+    else:
+        span = index.window(lo_w, hi_w) if room else (0, 0)
+        in_place = index.at(t) >= 0
+    for k in range(span[0], span[1]):
+        g = gaps[k]
         iv = _target(g, t)
         if iv is None:
             continue
@@ -430,6 +565,49 @@ def snap_one(t: float, gaps: list[Gap], max_shift: float,
         if d < best_d - 1e-9 or (abs(d - best_d) <= 1e-9 and cand < best_t):
             best_t, best_g, best_d = cand, g, d
     return (t, None, in_place) if best_g is None else (best_t, best_g, in_place)
+
+
+class _GapIndex:
+    """A pause list you can search instead of sweep.
+
+    `snap_one` asks one question per boundary: which pauses can hold a cut near this
+    moment. On an hour of tape the pause list runs to tens of thousands of entries
+    and sweeping it for every boundary is the cost that made long tapes look
+    unaffordable. Pauses come out of `gaps_from` ascending and disjoint, so two
+    binary searches pick out the handful that can actually answer.
+
+    The shape is *checked*, not assumed: a list that is not ascending and disjoint
+    yields no index at all, and the caller falls back to the full sweep. An
+    optimisation that quietly changes which pause a cut lands on is worse than the
+    O(n·m) it replaces, so `build` only returns an index it can prove."""
+
+    __slots__ = ("gaps", "a", "b")
+
+    def __init__(self, gaps: list[Gap]) -> None:
+        self.gaps = gaps
+        self.a = [g.start + BOUNDARY_PAD for g in gaps]     # stretch opens
+        self.b = [g.end - BOUNDARY_PAD for g in gaps]       # and closes
+
+    @classmethod
+    def build(cls, gaps: list[Gap]) -> "_GapIndex | None":
+        if not gaps:
+            return None
+        idx = cls(gaps)
+        a, b = idx.a, idx.b
+        ok = (all(x <= y for x, y in zip(a, a[1:])) and
+              all(x <= y for x, y in zip(b, b[1:])) and
+              all(p <= s for p, s in zip(b[:-1], a[1:])))
+        return idx if ok else None
+
+    def at(self, t: float) -> int:
+        """The pause whose legal stretch already contains `t`, or -1."""
+        k = bisect.bisect_right(self.a, t) - 1
+        return k if k >= 0 and t <= self.b[k] else -1
+
+    def window(self, lo: float, hi: float) -> tuple[int, int]:
+        """Half-open index range of pauses that can put a cut inside [lo, hi]."""
+        return (bisect.bisect_left(self.b, lo),
+                bisect.bisect_right(self.a, hi))
 
 
 def _overlap_sec(spans: list[tuple[float, float]]) -> float:
@@ -451,14 +629,15 @@ def _ms(x: float) -> float:
 
 # ─── public entry ─────────────────────────────────────────────────────────────
 
-def align(pcm, rate: int, cues: list[Cue],
-          max_shift: float = MAX_SHIFT_DEFAULT) -> dict:
-    """Move cue boundaries into the pauses the speaker actually took.
+def _check_rate(rate) -> None:
+    if rate is None or not isinstance(rate, int) or not RATE_MIN <= rate <= RATE_MAX:
+        raise AlignError(f"sample rate must be an integer {RATE_MIN}-{RATE_MAX} Hz",
+                         "bad_rate")
 
-    Single left-to-right pass, so a decision is made once against facts already
-    fixed to its left: the result cannot depend on look-ahead heuristics and
-    therefore cannot drift between runs. Text is copied verbatim into the output
-    cues — this function has no authority over words."""
+
+def _check_cues(cues, max_shift) -> float:
+    """The checks every entry runs before it reads a single sample: the request has
+    to be answerable before it becomes expensive to refuse."""
     if not cues:
         raise AlignError("no cues to align", "no_cues")
     if len(cues) > MAX_CUES:
@@ -471,17 +650,58 @@ def align(pcm, rate: int, cues: list[Cue],
     if not math.isfinite(shift) or not MAX_SHIFT_MIN <= shift <= MAX_SHIFT_LIMIT:
         raise AlignError(f"max_shift must be between {MAX_SHIFT_MIN} and "
                          f"{MAX_SHIFT_LIMIT} seconds", "bad_shift")
-    if rate is None or not isinstance(rate, int) or not RATE_MIN <= rate <= RATE_MAX:
-        raise AlignError(f"sample rate must be an integer {RATE_MIN}-{RATE_MAX} Hz",
-                         "bad_rate")
+    return shift
+
+
+def align(pcm, rate: int, cues: list[Cue],
+          max_shift: float = MAX_SHIFT_DEFAULT) -> dict:
+    """Move cue boundaries into the pauses the speaker actually took, from a tape
+    held whole in memory. The one-call shape of `align_curve`; the window a public
+    caller may throw at it is enforced here, not inside the algorithm."""
+    shift = _check_cues(cues, max_shift)
+    _check_rate(rate)
     n = len(pcm)
     if n < MIN_SAMPLES:
         raise AlignError(f"audio shorter than {MIN_SAMPLES} samples cannot be "
                          f"measured", "too_short")
     check_listen_window(n, rate)
+    return align_curve(cues, frame_curve(pcm, rate), shift)
 
-    read = detect_gaps(pcm, rate)
+
+def align_blocks(blocks, rate: int, cues: list[Cue],
+                 max_shift: float = MAX_SHIFT_DEFAULT,
+                 block_sec: float = BLOCK_SEC_MAX) -> dict:
+    """The same alignment over a tape that arrives in blocks, and therefore over a
+    tape longer than one window.
+
+    There is no second algorithm here to keep in sync: the blocks build one curve
+    and `align_curve` runs exactly as it does for a single-shot call, which is what
+    makes "we listened to all of it" a fact a test can prove rather than a promise
+    about a different code path. The sample ceiling is deliberately absent — it is
+    a memory law for anonymous callers, and this entry's memory is bounded by
+    `block_sec`, which `Envelope` enforces block by block."""
+    shift = _check_cues(cues, max_shift)
+    env = Envelope(rate, block_sec)
+    for b in blocks:
+        env.feed(b)
+    if env.samples < MIN_SAMPLES:
+        raise AlignError(f"audio shorter than {MIN_SAMPLES} samples cannot be "
+                         f"measured", "too_short")
+    return align_curve(cues, env.curve(), shift)
+
+
+def align_curve(cues: list[Cue], curve: dict,
+                max_shift: float = MAX_SHIFT_DEFAULT) -> dict:
+    """Align against a curve the caller has already measured.
+
+    Single left-to-right pass, so a decision is made once against facts already
+    fixed to its left: the result cannot depend on look-ahead heuristics and
+    therefore cannot drift between runs. Text is copied verbatim into the output
+    cues — this function has no authority over words."""
+    shift = _check_cues(cues, max_shift)
+    read = gaps_from(curve)
     gaps, duration = read["gaps"], read["duration"]
+    index = _GapIndex.build(gaps)
 
     out: list[Cue] = []
     moves: list[dict] = []
@@ -499,7 +719,7 @@ def align(pcm, rate: int, cues: list[Cue],
     for i, c in enumerate(cues):
         nxt = cues[i + 1] if i + 1 < len(cues) else None
         start, end = float(c.start), float(c.end)
-        ns, gs, sil_s = snap_one(start, gaps, shift, prev_end, end - MIN_SPAN)
+        ns, gs, sil_s = snap_one(start, gaps, shift, prev_end, end - MIN_SPAN, index)
         # `cue.end == next.start` is one cut with two names, and that is exactly
         # what every ASR and every editor exports. Walling the left name by the
         # right one's *unmoved* position means the cut can never travel: only the
@@ -518,13 +738,21 @@ def align(pcm, rate: int, cues: list[Cue],
         else:
             edge_hi = float(nxt.start) if nxt is not None else duration
             edge_lo = ns + MIN_SPAN
-        ne, ge, sil_e = snap_one(end, gaps, shift, edge_lo, edge_hi)
+        ne, ge, sil_e = snap_one(end, gaps, shift, edge_lo, edge_hi, index)
         # A card whose first and last frame both fall in the *same* pause has been
         # swallowed by it: the text would be on screen only while nobody speaks and
         # hidden for the whole line it translates. Alignment never creates that
         # state — the move responsible is undone, and if both are, the cue stays put
         # exactly as the client wrote it.
-        for g in gaps:
+        # With an index there is only one pause that can swallow a span: the one
+        # holding its first frame — disjoint lists cannot hold one span twice. The
+        # sweep keeps asking every pause, so both roads reach the same undo.
+        if index is None:
+            collapse: list[Gap] = gaps
+        else:
+            hold = index.at(ns)
+            collapse = [] if hold < 0 else [gaps[hold]]
+        for g in collapse:
             if not (_in_gap(g, ns, ne) and not _in_gap(g, start, end)):
                 continue
             end_free = not _in_gap(g, ns, end)     # new start + old end: no collapse
@@ -581,10 +809,18 @@ def align(pcm, rate: int, cues: list[Cue],
     doc_in = _overlap_sec([(float(c.start), float(c.end)) for c in cues])
     return {
         "engine": "ovoz-jimlik",
-        "audio": {"sample_rate": rate, "duration": duration,
+        "audio": {"sample_rate": curve["sample_rate"], "duration": duration,
                   "frames": read["frames"], "speech_sec": read["speech_sec"],
                   "silence_sec": read["silence_sec"], "gaps": len(gaps),
                   "window_sec": MAX_LISTEN_SEC,
+                  # How this answer was heard, not only what it found: a tape that
+                  # arrived in blocks says so, and says how big a piece of it was
+                  # ever in hand. `duration` alone would let an hour of tape look
+                  # identical to the fifteen minutes a single call can hold.
+                  "heard_sec": duration,
+                  "blocks": curve.get("blocks", 1),
+                  "block_sec": round(curve.get("block_sec", MAX_LISTEN_SEC), 3),
+                  "streamed": "blocks" in curve,
                   "speech_runs": read["speech_runs"],
                   "noise_floor": read["noise_floor"],
                   "speech_level": read["speech_level"],

@@ -415,6 +415,92 @@ def test_the_share_view_offers_exactly_what_the_private_view_offers(client, auth
 
 # ─── Round 14.1: what the adversarial review and browser QA caught ────────────
 
+def _reference_profiles(pcm, segs) -> list:
+    """The in-memory window math, spelled out here as the oracle.
+
+    Round 25 replaced `_voices(pcm, segments)` with windows collected out of a
+    stream, and "the same math" is exactly the kind of claim a suite should not
+    accept from a comment: this is what a buffer would have produced, so the book
+    has to match it or the diarizer is describing a tape nobody heard."""
+    from app import pipeline as pl
+
+    rate = pl.DIAR_PCM_RATE
+    window = pl.DIAR_MAX_SAMPLES * pl.DIAR_STRIDE
+    out: list = []
+    for s in segs:
+        a = max(0, int(s.start * rate))
+        b = min(len(pcm), int(max(s.end, s.start) * rate))
+        span = b - a
+        if span <= window:
+            out.append(pl._voice_of(pcm[a:b:pl.DIAR_STRIDE]))
+            continue
+        n = min(pl.DIAR_VOICE_WINDOWS, span // window)
+        last = span - window
+        out.append(pl._avg_profile([
+            pl._voice_of(pcm[a + last * k // max(1, n - 1):
+                             a + last * k // max(1, n - 1) + window:pl.DIAR_STRIDE])
+            for k in range(n)]))
+    return out
+
+
+def _collect(pcm, segs, chunk_samples: int) -> tuple[list, int]:
+    """The span book fed like a pipe: fixed chunks, absolute offsets, one finish."""
+    from app import pipeline as pl
+
+    book = pl._SpanBook(pl._profile_spans(segs), len(segs))
+    raw = pcm.tobytes()
+    step = max(2, chunk_samples * 2)
+    off = 0
+    while off < len(raw):
+        data = raw[off:off + step]
+        book.consume(off // 2, data)
+        off += len(data)
+    return book.finish()
+
+
+@pytest.mark.parametrize("chunk", [1_000, 4_001, 8_000, 60_000, 10**9])
+def test_a_voice_profile_is_the_same_whatever_the_block_size(chunk):
+    """One window per profile, four windows per long cue, and none of it depends on
+    where a reader happened to stop: the book closes a window with the samples the
+    stream carried through it, and the seam is not a fact about the tape.
+
+    `4_001` is the awkward one on purpose — an odd chunk size lands window edges in
+    the middle of nowhere, which is where an off-by-one lives."""
+    from array import array
+
+    from app import pipeline as pl
+    from app.providers.base import Segment
+
+    rate = pl.DIAR_PCM_RATE
+    pcm = array("h", [400 if i < rate * 10 else 20000 for i in range(rate * 20)])
+    segs = [Segment(1.0, 3.0, "birinchi"), Segment(16.0, 18.0, "ikkinchi"),
+            Segment(8.0, 12.0, "aralash"), Segment(10.5, 11.0, "korotqa")]
+    voices, lost = _collect(pcm, segs, chunk)
+    assert lost == 0, lost
+    assert voices == _reference_profiles(pcm, segs), f"block {chunk} changed the voices"
+
+
+def test_a_cue_that_is_not_on_the_tape_gets_no_voice_and_is_counted():
+    """The old `_voices` clamped a cue to `min(len(pcm), …)` and measured what was
+    left: a profile of a fragment, reported as a voice.
+
+    A stream cannot go back for the samples it already passed, so a cue reaching
+    past the end now gets no profile and one more count in `off_tape` — the honest
+    version of the same fact, and the only one a job can still tell in three
+    languages."""
+    from array import array
+
+    from app import pipeline as pl
+    from app.providers.base import Segment
+
+    rate = pl.DIAR_PCM_RATE
+    pcm = array("h", [20000 if i % 2 else -20000 for i in range(rate * 20)])
+    voices, lost = _collect(pcm, [Segment(1.0, 3.0, "ichida"),
+                                  Segment(19.0, 40.0, "tashqarida")], 60_000)
+    assert lost == 1, lost
+    assert voices[0] is not None and voices[1] is None, voices
+
+
 def test_a_voice_profile_is_read_from_the_window_it_claims():
     """A cue at 16 s must be measured at 16 s.
 
@@ -428,16 +514,16 @@ def test_a_voice_profile_is_read_from_the_window_it_claims():
 
     rate = pl.DIAR_PCM_RATE
     pcm = array("h", [400 if i < rate * 10 else 20000 for i in range(rate * 20)])
-    # The buffer, not the file: since Round 17 one decode serves the aligner and
-    # the diarizer alike, so `_voices` is handed PCM and no longer a path.
-    quiet, loud = pl._voices(pcm, [Segment(1.0, 3.0, "birinchi"),
-                                   Segment(16.0, 18.0, "ikkinchi")])
+    # The book, not the buffer: since Round 25 one stream serves the aligner, the
+    # diarizer and the word timer alike, so profiles come out of `_SpanBook`.
+    quiet, loud = _collect(pcm, [Segment(1.0, 3.0, "birinchi"),
+                                 Segment(16.0, 18.0, "ikkinchi")], 60_000)[0]
     assert quiet[0] < 0.05 < 0.4 < loud[0], (quiet, loud)
     # A cue that straddles the boundary must be described by the whole utterance.
     # Truncating every profile to its first second turned an onset — a breath, a
     # stressed vowel — into a voice, which is exactly the false split the engine is
     # not allowed to make.
-    straddle = pl._voices(pcm, [Segment(8.0, 12.0, "aralash")])[0]
+    straddle = _collect(pcm, [Segment(8.0, 12.0, "aralash")], 60_000)[0][0]
     assert straddle[0] > 0.15, straddle
 
 

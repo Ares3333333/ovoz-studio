@@ -93,6 +93,30 @@ def block_cues(seconds: float, per_block: float = BLOCK_SEC) -> list:
             for i in range(n)]
 
 
+def listening(pcm, segs: list, billed_minutes: float, rate: int = RATE):
+    """The listening pass this buffer would produce, run by the production loop.
+
+    Only the ffmpeg pipe is replaced — the envelope, the block size, the ceiling,
+    the profile windows and the truncation sentence all come out of `pipeline`, so
+    a test that reads these numbers reads the same decision a job makes. Feeding a
+    finished buffer is not the same thing as feeding a socket, and it is exactly the
+    difference the invariance tests below care about.
+    """
+    from app import pipeline as pl
+
+    assert rate == pl.DIAR_PCM_RATE, "_drain reads the pipeline's own rate"
+    raw = pcm.tobytes() if isinstance(pcm, array) else bytes(pcm)
+    pos = 0
+
+    def read_block(nbytes: int) -> bytes:
+        nonlocal pos
+        out = raw[pos:pos + nbytes]
+        pos += len(out)
+        return out
+
+    return pl._drain(read_block, segs, billed_minutes)
+
+
 def wav_bytes(pcm, rate: int = RATE, channels: int = 1, width: int = 2,
               framerate: int | None = None) -> bytes:
     buf = io.BytesIO()
