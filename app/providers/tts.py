@@ -19,7 +19,8 @@ class StubTTS:
 
     name = "stub-tone"
 
-    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float) -> None:
+    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float,
+                   speaker: int = 0) -> None:
         dur = max(0.3, min(dur_sec, 30.0))
         n = int(SAMPLE_RATE * dur)
         base = 220.0 if lang == "uz" else 180.0  # разная «интонация» по языкам
@@ -39,31 +40,33 @@ class StubTTS:
 
 class EdgeTTS:
     """Реальный TTS через Microsoft Edge neural voices. Голоса подобраны живым
-    `--list-voices`: у Microsoft единственный узбекский локат — `uz-UZ` (Madina
-    женский, Sardor мужской). Прежнее `uz-MM-AtiyeNeural` не существовало: локат
-    `MM` выдуман, имени `Atiye` нет, и каждый реальный узбекский даббинг падал на
-    `NoAudioReceived`. Слоты времени речи не выдумываем — берём то, что отдаёт API."""
+    `--list-voices` (Round 29/31), не по памяти: у Microsoft единственный узбекский
+    локат — `uz-UZ`. Каждый язык — пара [основной(женский), запасной(мужской)],
+    чтобы диалог двух голосов озвучивали два разных реальных голоса, а не один."""
 
     VOICES = {
-        "uz": "uz-UZ-MadinaNeural",
-        "uz_male": "uz-UZ-SardorNeural",
-        "ru": "ru-RU-SvetlanaNeural",
-        "en": "en-US-JennyNeural",
+        "uz": ["uz-UZ-MadinaNeural", "uz-UZ-SardorNeural"],
+        "ru": ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
+        "en": ["en-US-JennyNeural", "en-US-GuyNeural"],
     }
-    # `uz`/`ru`/`en` are selectable (they match the job LANGS the dubbing target can
-    # be). `uz_male` is a real voice we verified but is NOT yet reachable: no form
-    # field, job meta or flag selects a gender, so a dub of speaker 1 vs 2 still uses
-    # one voice per language. It is kept here, reserved, so per-speaker casting can
-    # wire it end-to-end later without guessing an id again. Anything else falls back
-    # to Russian rather than inventing a voice id that 404s.
+    # `uz`/`ru`/`en` are exactly the dubbing targets the job LANGS allow, and each
+    # carries two verified voices so a diarized speaker map can be cast. An unknown
+    # language falls back to Russian rather than inventing a voice id that 404s.
     name = "edge-tts"
 
-    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float) -> None:
+    def _voice(self, lang: str, speaker: int) -> str:
+        seq = self.VOICES.get(lang) or self.VOICES["ru"]
+        if speaker and speaker > 0:
+            return seq[(speaker - 1) % len(seq)]   # 1-based diarization -> 0-based
+        return seq[0]                              # no speaker map -> primary voice
+
+    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float,
+                   speaker: int = 0) -> None:
         import asyncio
 
         import edge_tts  # опциональная зависимость: pip install edge-tts
 
-        voice = self.VOICES.get(lang, self.VOICES["ru"])
+        voice = self._voice(lang, speaker)
 
         async def _run() -> None:
             com = edge_tts.Communicate(text, voice)

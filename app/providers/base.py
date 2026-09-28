@@ -28,4 +28,5 @@ class TranslateProvider(Protocol):
 class TTSProvider(Protocol):
     name: str
 
-    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float) -> None: ...
+    def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float,
+                   speaker: int = 0) -> None: ...

@@ -784,7 +784,12 @@ def _execute(job: dict, deadline: float = 0) -> None:
         _check_deadline()
         tts = get_tts()
         db.add_job_event(jid, "tts", f"{tts.name}: {len(translated)} lines")
-        rep = _mix_dubbing(jid, translated, tts, tgt, art)
+        # Кастинг по голосам: если диаризация заказана, реплика каждого спикера
+        # получает свой голос (Madina/Sardor…), а не один диктор на весь диалог.
+        # Без диаризации speakers=None → один основной голос (обратная совместимость).
+        speakers = ([turns[i].speaker if i < len(turns) else 0
+                     for i in range(len(translated))] if turns else None)
+        rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers)
         # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
         # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую
         # нарезку. Числа финитные; путь файла наружу не идёт.
@@ -824,7 +829,8 @@ def _dub_schedule(segments: list[Segment], actuals: list[float],
     return starts, min(total, cap_sec), clipped
 
 
-def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) -> dict:
+def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
+                 speakers: list[int] | None = None) -> dict:
     rate = 22050
     # Два прохода, но НЕ удержанием всех голосов в памяти: первый проход измеряет
     # реальную длительность каждой реплики и оставляет PCM на диске (по одному
@@ -836,7 +842,10 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) 
     try:
         for idx, s in enumerate(translated):
             tmp = art / f"line_{idx}_{int(s.start * 1000)}.wav"
-            tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start)
+            # speaker>0 chooses an alternate voice for this diarized speaker; 0/None
+            # keeps the single primary voice (stub and non-diarized jobs unchanged).
+            spk = speakers[idx] if speakers else 0
+            tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start, speaker=spk)
             _ensure_wav(tmp)  # now guarantees 22050 mono 16-bit PCM
             with wave.open(str(tmp), "rb") as w:
                 sr = w.getframerate() or rate

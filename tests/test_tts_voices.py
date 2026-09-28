@@ -20,26 +20,45 @@ VOICE_ID = re.compile(r"^[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural$")
 
 
 def test_every_configured_voice_is_a_microsoft_voice_shape():
-    for lang, voice in EdgeTTS.VOICES.items():
-        assert VOICE_ID.match(voice), f"{lang!r} voice {voice!r} is not a valid id"
+    for lang, voices in EdgeTTS.VOICES.items():
+        assert voices, f"{lang!r} has no voice"
+        for voice in voices:
+            assert VOICE_ID.match(voice), f"{lang!r} voice {voice!r} is not a valid id"
 
 
 def test_the_uzbek_voice_uses_the_only_real_uzbek_locale():
-    """The exact bug this round fixed: `uz-MM-...`. Microsoft publishes exactly one
+    """The exact bug Round 29 fixed: `uz-MM-...`. Microsoft publishes exactly one
     Uzbek locale (`uz-UZ`); any other region code cannot exist, so the guard is on
     the prefix, not on the (unknowable-offline) voice name."""
-    assert EdgeTTS.VOICES["uz"].startswith("uz-UZ-"), EdgeTTS.VOICES["uz"]
-    assert EdgeTTS.VOICES["ru"].startswith("ru-RU-")
-    assert EdgeTTS.VOICES["en"].startswith("en-US-")
+    for voice in EdgeTTS.VOICES["uz"]:
+        assert voice.startswith("uz-UZ-"), voice
+    for voice in EdgeTTS.VOICES["ru"]:
+        assert voice.startswith("ru-RU-")
+    for voice in EdgeTTS.VOICES["en"]:
+        assert voice.startswith("en-US-")
 
 
-def test_every_sellable_target_language_has_its_own_voice():
-    """The invariant this round exists to protect: any language the product will sell
-    a dub in must have a first-class voice, or a future LANGS entry would dub in
-    Russian and still reach `done` silently. Also pins the reserved uz_male locale."""
+def test_every_sellable_target_language_can_be_cast_two_ways():
+    """Round 31 needs two verified voices per language so a diarized dialogue is
+    dubbed by distinct people. Any LANGS the product sells must have that pair, or a
+    future language would dub everyone in one voice (or worse, Russian) silently."""
     from app.main import LANGS
     assert LANGS <= set(EdgeTTS.VOICES), LANGS - set(EdgeTTS.VOICES)
-    assert EdgeTTS.VOICES["uz_male"].startswith("uz-UZ-")
+    for lang in LANGS:
+        assert len(EdgeTTS.VOICES[lang]) >= 2, f"{lang} cannot cast two speakers"
+
+
+def test_voice_selection_cycles_by_speaker():
+    """Diarization is 1-based: speaker 1 -> primary (female), speaker 2 -> alternate
+    (male), speaker 3 -> back to primary. speaker 0 (no map) -> primary. This is the
+    whole casting rule, so it is pinned without needing the network."""
+    tts = EdgeTTS()
+    uz = EdgeTTS.VOICES["uz"]
+    assert tts._voice("uz", 0) == uz[0]
+    assert tts._voice("uz", 1) == uz[0]
+    assert tts._voice("uz", 2) == uz[1]
+    assert tts._voice("uz", 3) == uz[0]        # cycles, never indexes off the end
+    assert tts._voice("de", 2) == EdgeTTS.VOICES["ru"][1]  # unknown lang -> ru pair
 
 
 def test_synthesize_selects_the_real_uzbek_voice(tmp_path, monkeypatch):
@@ -66,9 +85,9 @@ def test_synthesize_selects_the_real_uzbek_voice(tmp_path, monkeypatch):
     monkeypatch.setattr(edge_tts, "Communicate", FakeCom)
     tts = EdgeTTS()
     tts.synthesize("Salom", "uz", tmp_path / "a.wav", dur_sec=1.0)
-    assert captured["voice"] == EdgeTTS.VOICES["uz"] == "uz-UZ-MadinaNeural"
+    assert captured["voice"] == EdgeTTS.VOICES["uz"][0] == "uz-UZ-MadinaNeural"
     tts.synthesize("Salom", "kk", tmp_path / "b.wav", dur_sec=1.0)
-    assert captured["voice"] == EdgeTTS.VOICES["ru"], "unknown lang must fall back, not guess"
+    assert captured["voice"] == EdgeTTS.VOICES["ru"][0], "unknown lang must fall back, not guess"
 
 
 def test_status_reports_edge_real_only_when_the_package_is_present(monkeypatch):

@@ -159,7 +159,7 @@ class _OverrunVoice:
     ever did this, which is exactly why the bug survived every prior round."""
     name = "fake-neural"
 
-    def synthesize(self, text, lang, out_path, dur_sec):
+    def synthesize(self, text, lang, out_path, dur_sec, speaker=0):
         _sine_wav(Path(out_path), dur_sec * 3.0)
 
 
@@ -208,7 +208,7 @@ def test_a_disciplined_voice_is_never_reported_as_retimed(client, auth, monkeypa
     class _FittingVoice:
         name = "fake-fit"
 
-        def synthesize(self, text, lang, out_path, dur_sec):
+        def synthesize(self, text, lang, out_path, dur_sec, speaker=0):
             _sine_wav(Path(out_path), dur_sec)     # exactly on budget
 
     monkeypatch.setattr(pipeline, "get_tts", lambda: _FittingVoice())
@@ -249,7 +249,7 @@ class _RunawayVoice:
     `if shifted:` gate would have stayed silent about."""
     name = "fake-runaway"
 
-    def synthesize(self, text, lang, out_path, dur_sec):
+    def synthesize(self, text, lang, out_path, dur_sec, speaker=0):
         _bulk_wav(Path(out_path), 100 * RATE)
 
 
@@ -283,3 +283,37 @@ def test_dubbing_leaves_no_per_line_temp_files(client, auth, monkeypatch):
     jid = r.json()["job"]["id"]
     leftovers = [p.name for p in pipeline._art_dir(jid).glob("line_*.wav")]
     assert not leftovers, f"temp voices leaked: {leftovers}"
+
+
+class _RecordingVoice:
+    """A fake provider that remembers the `speaker` it was asked for on each line."""
+    name = "fake-recorder"
+
+    def __init__(self):
+        self.calls = []
+
+    def synthesize(self, text, lang, out_path, dur_sec, speaker=0):
+        self.calls.append(speaker)
+        _sine_wav(Path(out_path), dur_sec)
+
+
+def test_mix_dubbing_casts_each_diarized_speaker(tmp_path, monkeypatch):
+    """Round 31: with a speaker map, each line's diarized speaker must reach the
+    provider, so a two-person dialogue can get two real voices instead of one
+    narrator reading everyone. add_artifact is stubbed (no job row needed)."""
+    monkeypatch.setattr(pipeline.db, "add_artifact", lambda *a, **k: None)
+    segs = [Segment(0.0, 2.0, "a"), Segment(2.0, 4.0, "b"), Segment(4.0, 6.0, "c")]
+    tts = _RecordingVoice()
+    pipeline._mix_dubbing("job", segs, tts, "uz", tmp_path, speakers=[1, 2, 1])
+    assert tts.calls == [1, 2, 1], tts.calls
+    assert (tmp_path / "dubbing.wav").exists()
+
+
+def test_mix_dubbing_without_a_map_uses_one_voice(tmp_path, monkeypatch):
+    """Backward-compat: no diarization (speakers=None) keeps every line on the primary
+    voice (speaker 0) — the pre-Round-31 behavior is untouched."""
+    monkeypatch.setattr(pipeline.db, "add_artifact", lambda *a, **k: None)
+    segs = [Segment(0.0, 2.0, "a"), Segment(2.0, 4.0, "b")]
+    tts = _RecordingVoice()
+    pipeline._mix_dubbing("job", segs, tts, "uz", tmp_path)
+    assert tts.calls == [0, 0], tts.calls
