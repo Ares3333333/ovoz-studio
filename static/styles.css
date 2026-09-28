@@ -507,6 +507,28 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
   text-shadow: 0 2px 4px #000, 0 0 14px rgba(0, 0, 0, .9); pointer-events: none;
 }
 .player-bar { display: flex; align-items: center; gap: 14px; padding: 14px 20px; font-size: 13px; }
+.player-bar > * { min-width: 0; overflow-wrap: anywhere; }
+
+/* Предпросмотр: слово горит ровно там, где его сказало Ovoz So'z. Ни анимации
+ * позиции, ни тени на весь блок — только смена цвета на кадре движка, чтобы
+ * подсветка не уползала от речи на медленных телефонах. */
+.stage audio { width: 100%; align-self: center; }
+#p-video[hidden], #p-audio[hidden] { display: none; }
+.p-word { color: var(--ink); transition: color .1s linear; }
+.p-word.on { color: var(--mint); text-shadow: 0 0 16px rgba(52, 226, 160, .5); }
+.p-speaker {
+  display: inline-block; margin-right: 8px; padding: 1px 9px; border-radius: 999px;
+  font-size: .6em; font-weight: 800; letter-spacing: .05em; vertical-align: .22em;
+  background: rgba(52, 226, 160, .16); color: var(--mint);
+  border: 1px solid rgba(52, 226, 160, .35);
+}
+.p-speaker[hidden] { display: none; }
+/* Демотекст помечается и в предпросмотре: чип «текст демо» есть на карточке
+ * задачи, но человек, смотрящий ленту в диалоге, карточку уже закрыл. */
+.p-demo { background: rgba(255, 183, 94, .16); color: var(--amber);
+          border-color: rgba(255, 183, 94, .35); }
+.player-head .lang-switch { margin-left: auto; }
+.player-head .btn { margin-left: 10px; }
 .pay-dlg { width: min(92vw, 430px); }
 #pay-body { padding: 0 20px 22px; }
 .pay-line { display: flex; justify-content: space-between; padding: 11px 2px; border-bottom: 1px solid #222938; font-size: 14px; }

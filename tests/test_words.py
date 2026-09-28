@@ -615,6 +615,39 @@ def test_a_transcribe_job_says_the_option_does_not_apply(client, auth):
     assert "subtitle job" in line["message"], line
 
 
+def test_markup_on_a_line_is_not_a_spoken_word():
+    """`[S1]` and `[демо]` are labels the pipeline types into the caption; nobody
+    pronounces them, so they have no duration on the tape and no business being in a
+    word count. Before this, a diarized job billed its brackets as words and the
+    preview lit up a bracket at t=0 — a highlight on punctuation looks exactly like
+    a broken engine to the person who paid for word timings.
+    """
+    assert W.tokens("[S1] [демо] Birinchi cümle, to'xtadi.") == \
+           ["Birinchi", "cümle,", "to'xtadi."]
+    assert W.tokens("— … 42") == ["42"]          # a bare dash is not speech either
+    assert W.tokens("") == [] and W.tokens(None) == []
+    assert W.tokens("[S12] Salom")[0] == "Salom"
+    # The tokens that remain are still returned byte for byte, in order.
+    assert W.tokens("[S2] Ovoz — audio studio") == ["Ovoz", "audio", "studio"]
+
+
+def test_a_tagged_line_is_timed_without_its_tag():
+    """The same law seen through the engine's own report: a cue that carries a
+    speaker label must not report a word whose text is that label, and the timings
+    of the real words must not move because a bracket was dropped.
+    """
+    plain = W.words(PHRASE, RATE, [Cue(1, ONE_LINE[0].start, ONE_LINE[0].end,
+                                       ONE_LINE[0].text)])
+    tagged = W.words(PHRASE, RATE, [Cue(1, ONE_LINE[0].start, ONE_LINE[0].end,
+                                        "[S1] " + ONE_LINE[0].text)])
+    a = plain["cues"][0]["words"]
+    b = tagged["cues"][0]["words"]
+    assert a and b and [w["w"] for w in a] == [w["w"] for w in b], (a, b)
+    assert [(w["s"], w["e"]) for w in a] == [(w["s"], w["e"]) for w in b]
+    assert all(not w["w"].startswith("[S") for w in b)
+    assert tagged["summary"]["words"] == len(b) == plain["summary"]["words"]
+
+
 def test_the_step_writes_a_report_and_a_karaoke_track(client, auth, tmp_path):
     r"""The artifact pair is the paid deliverable: the JSON says how every boundary
     was found, the ASS is what a player burns in. The plain subtitle track must

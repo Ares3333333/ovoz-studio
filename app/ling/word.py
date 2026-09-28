@@ -20,7 +20,9 @@ goes to the quietest frame nearby, and the report says which of the two happened
 The contract, held by tests:
 
   * **the words are not ours to change** — every token comes back byte-for-byte,
-    in order, none added or dropped; the text is copied, never re-split;
+    in order, none added or dropped; the text is copied, never re-split. Tokens
+    that carry no letters (`[S1]`, `[демо]`, a lone «—») are markup, not speech: a
+    label on a line has no duration on the tape and gets no highlight,
   * **the cue is partitioned, not approximated** — the first word starts exactly
     where the cue starts and the last ends exactly where the cue ends, cuts are
     strictly increasing and contiguous, so the highlight never stalls or overlaps;
@@ -65,9 +67,28 @@ _IOTIZED = frozenset("ёюяЁЮЯ")
 _APOSTROPHE = "ʻʼ’'‘`"
 
 _WORD_RE = re.compile(r"\S+")
+# A caption line carries markup that is nobody's speech: `[S1]` (who is talking),
+# `[демо]` (how the text was obtained) and `[Музыка]` (a sound, not a line) are
+# typed labels the reader sees and no mouth pronounces. Timing them would give the
+# preview a highlight that sits on a bracket, and would bill the line a "word" that
+# has no length in the tape — which is exactly what a bracket means in a subtitle.
+# A bare number, on the other hand, is spoken — «qirq ikki» is a word the mouth
+# says — so the test is "any letter or digit", not "any letter".
+_TAG_RE = re.compile(r"^\[[^\]]*\]$")
+
+
+def tokens(text: str | None) -> list[str]:
+    """The spoken words of a line: whitespace-split, tags and bare punctuation out.
+
+    "Every token comes back byte-for-byte" still holds for what this returns — it is
+    the *set* of timed tokens that excludes markup, and the exclusion is what makes
+    `words` mean words to a person counting them on screen.
+    """
+    return [t for t in _WORD_RE.findall(text or "")
+            if not _TAG_RE.match(t) and any(ch.isalnum() for ch in t)]
 
 __all__ = ["WordError", "words", "words_curve", "words_blocks", "weights",
-           "to_vtt", "to_ass", "pcm_from_wav"]
+           "tokens", "to_vtt", "to_ass", "pcm_from_wav"]
 
 
 class WordError(AlignError):
@@ -231,7 +252,7 @@ def _check_cues(cues, rate, n: int | None) -> None:
     if len(cues) > MAX_CUES:
         raise WordError(f"too many cues ({len(cues)}, max {MAX_CUES})",
                         "too_many_cues")
-    counted = sum(len(_WORD_RE.findall(c.text or "")) for c in cues)
+    counted = sum(len(tokens(c.text)) for c in cues)
     if counted > MAX_WORDS:
         # CPU budget: every cut searches a window of frames, so the number of
         # words — not the length of the tape — bounds what an anonymous call costs.
@@ -309,7 +330,7 @@ def words_curve(cues: list[Cue], curve: dict) -> dict:
 
     for c in cues:
         start, end = float(c.start), float(c.end)
-        toks = _WORD_RE.findall(c.text or "")
+        toks = tokens(c.text)
         base = {"i": c.index, "start": round(start, 3), "end": round(end, 3)}
         if not toks:
             out.append({**base, "words": [], "reason": "no_text"})

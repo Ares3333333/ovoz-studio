@@ -7,7 +7,7 @@
  *   – API calls: network-first, cache fallback only for GET /api/plans, /api/v1/info
  *   – Everything else: network-only (no cache poisoning)
  * ──────────────────────────────────────────────────────────────────── */
-const BUILD = '0.22.1';
+const BUILD = '0.23.0';
 const VERSION = 'ovoz-v' + BUILD;
 const SHELL_CACHE = VERSION + '-shell';
 const API_CACHE = VERSION + '-api';

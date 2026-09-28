@@ -1588,7 +1588,7 @@ function renderJobs(jobs) {
     const jid = esc(j.id);
     const arts = Object.entries(j.artifacts || {});
     const links = arts.map(([kind, url]) =>
-      `<button class="art" data-dl="${esc(url)}" data-kind="${esc(kind)}" data-name="${esc(kind + '-' + j.id)}">${esc(kindLabel(kind))}</button>`
+      `<button class="art" data-dl="${esc(url)}" data-kind="${esc(kind)}" data-name="${esc(kind + '-' + j.id)}" title="${esc(t("download"))}">${esc(kindLabel(kind))}</button>`
     ).join("");
     const preview = j.artifacts?.srt
       ? `<button class="art" data-preview="${esc(j.id)}">${esc(t("preview"))} \u25B8</button>` : "";
@@ -1864,45 +1864,167 @@ function renderLoadMore() {
   }
 }
 
-// ─── плеер субтитров поверх видео ───
-let cues = [];
-function parseSrtClient(text) {
-  cues = [];
-  for (const block of text.trim().split(/\n\s*\n/)) {
-    const lines = block.split("\n").filter(l => l.trim());
-    const m = lines.join("\n").match(/(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})/);
-    if (!m) continue;
-    const toS = (h, mi, s, ms) => +h * 3600 + +mi * 60 + +s + ms / 1000;
-    const start = toS(m[1], m[2], m[3], m[4]);
-    const end = toS(m[5], m[6], m[7], m[8]);
-    const textIdx = lines.findIndex(l => l.includes("-->"));
-    cues.push({ start, end, text: lines.slice(textIdx + 1).join(" ") });
+// ─── предпросмотр результата: материал job'а + подсветка слов движка ─────────
+// Просмотр раньше просил клиента заново выбрать свой файл и парсил SRT в браузере.
+// Теперь карточки, пословные тайминги и голоса приходят одним ответом с сервера,
+// а медиа берётся из самой задачи: два толкования одного файла (парсер в JS и
+// парсер в движке) — это расхождение, которое никто не заметит, пока подсветка не
+// начнёт опережать речь на слог.
+let _pcues = [];         // строки /caption: {start,end,text,words,speaker}
+let _pmedia = null;      // URL blob'а медиа или null (записи больше нет)
+let _pcur = -1;          // индекс активной карточки: перекрашивать раз в смену
+let _pstats = { words: 0, voices: 0, total: 0 };   // считаны один раз на загрузку
+let _pjob = null, _pbytes = 0, _pnoteKey = "", _pdemo = false;
+
+// Строки, которые генерирует JS, а не словарь: смена языка обязана переписать и
+// их, иначе просмотр останется висеть на языке прошлой сессии.
+function paintPlayerNote() {
+  $("#p-srtname").textContent = (_pbytes ? t("player_from_job") : t("player_srt")) +
+    " · " + (_pbytes ? Math.round(_pbytes / 1024) + " KB" : (_pjob || "").slice(0, 8));
+  $("#p-meta").textContent = _pnoteKey ? t(_pnoteKey) : "";
+}
+
+window.__playerRepaint = () => {
+  if (!_pjob || !$("#player-dlg").open) return;
+  paintPlayerNote();
+  if (_pdemo) $("#p-demo").textContent = t("asr_demo_chip");
+  if (_pnoteKey) return;                      // the notice is already the message
+  _pcur = -1;
+  const el = $($("#p-video").hidden ? "#p-audio" : "#p-video");
+  if (_pcues.length) playerTime(el.currentTime || _pcues[0].start);
+}
+
+function paintCue(c) {
+  const box = $("#p-cue"), sp = $("#p-speaker"), dm = $("#p-demo");
+  if (!c) {
+    // Between the last card and the end of the tape there is nothing to show —
+    // but the notice line must not go blank: it is the only place that says how
+    // many cards and words this preview holds, and silence reads as a bug.
+    box.textContent = ""; sp.hidden = true; _pcur = -1;
+    _pnoteKey = ""; paintPlayerNote(); paintStats(null);
+    return;
+  }
+  const idx = _pcues.indexOf(c);
+  if (idx === _pcur) return;                 // timeupdate comes 4×/second
+  _pcur = idx;
+  box.innerHTML = (c.words && c.words.length)
+    ? c.words.map(w => `<span class="p-word">${esc(w.w)}</span>`).join(" ")
+    : esc(c.text);
+  // Diarization numbers speakers from 1 (`[S1]` in the file itself); adding one
+  // here invented a second voice on a job the engine heard as one.
+  sp.hidden = c.speaker === null || c.speaker === undefined;
+  if (!sp.hidden) sp.textContent = "S" + c.speaker;
+  dm.hidden = !_pdemo;
+  if (_pdemo) dm.textContent = t("asr_demo_chip");
+  paintStats(idx + 1);
+}
+
+function paintStats(cardNo) {
+  $("#p-meta").textContent = tf("player_stats", {
+    a: cardNo === null ? "—" : cardNo, b: _pstats.total || _pcues.length,
+    c: _pstats.words, d: _pstats.voices });
+}
+
+function paintWord(c, tsec) {
+  if (!c || !c.words || !c.words.length) return;
+  const spans = $("#p-cue").children;
+  for (let i = 0; i < c.words.length; i++) {
+    const w = c.words[i], el = spans[i];
+    if (!el) continue;
+    el.classList.toggle("on", tsec >= w.s && tsec < w.e);
   }
 }
+
+function playerTime(sec) {
+  const c = _pcues.find(x => sec >= x.start && sec <= x.end);
+  paintCue(c || null);
+  if (c) paintWord(c, sec);
+}
+
 async function openPlayer(jobId) {
   const dlg = $("#player-dlg");
   dlg.showModal();
+  _pjob = jobId; _pbytes = 0; _pnoteKey = ""; _pdemo = false;
+  _pcues = []; _pcur = -1; _pstats = { words: 0, voices: 0, total: 0 };
   $("#p-cue").textContent = "";
+  $("#p-speaker").hidden = true;
+  $("#p-demo").hidden = true;
+  $("#p-meta").textContent = "";
   $("#p-srtname").textContent = t("player_srt") + " · " + jobId.slice(0, 8);
+  hideMedia();
+  let cap;
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/download/srt`,
-      { headers: { Authorization: "Bearer " + token } });
-    if (!resp.ok) throw new Error(t("err_not_ready"));
-    const srt = await resp.text();
-    parseSrtClient(srt);
-  } catch (e) { toast(e.message || "SRT load failed", true); }
+    cap = await api(`/api/jobs/${jobId}/caption`);
+  } catch (e) { toast(e.message || t("err_not_ready"), true); return; }
+  _pcues = cap.cues || [];
+  _pdemo = !!cap.demo;
+  _pstats = {
+    words: cap.words || _pcues.reduce((n, x) => n + ((x.words || []).length), 0),
+    voices: new Set(_pcues.filter(x => x.speaker !== null && x.speaker !== undefined)
+                    .map(x => x.speaker)).size,
+    total: cap.total || _pcues.length };
+  if (!cap.count) { _pnoteKey = "steps_none"; $("#p-meta").textContent = t("steps_none"); }
+  if (cap.media) {
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/media`,
+        { headers: { Authorization: "Bearer " + token } });
+      if (!resp.ok) throw new Error(String(resp.status));
+      _pmedia = URL.createObjectURL(await resp.blob());
+      showMedia(cap.media.kind, _pmedia, cap.media.bytes);
+    } catch (err) {
+      _pmedia = null;
+      _pnoteKey = "player_no_media";
+      $("#p-meta").textContent = t("player_no_media");
+    }
+  } else {
+    _pmedia = null;
+    _pnoteKey = "player_no_media";
+    $("#p-meta").textContent = t("player_no_media");
+  }
 }
+
+function showMedia(kind, url, bytes) {
+  const v = $("#p-video"), a = $("#p-audio");
+  const el = kind === "video" ? v : a;
+  v.hidden = el !== v; a.hidden = el !== a;
+  if (el.src !== url) { el.src = url; el.load(); }
+  // assign, never addEventListener: this function runs again on every manual file
+  // pick, and a listener stack would paint the same cue from three handlers.
+  el.ontimeupdate = () => playerTime(el.currentTime);
+  _pbytes = bytes || 0;
+  paintPlayerNote();
+}
+
+function hideMedia() {
+  [$("#p-video"), $("#p-audio")].forEach(el => {
+    el.pause(); el.removeAttribute("src"); el.load(); el.hidden = true;
+  });
+  if (_pmedia) { URL.revokeObjectURL(_pmedia); _pmedia = null; }
+}
+
 $("#p-load-video").addEventListener("click", () => $("#p-vfile").click());
 $("#p-vfile").addEventListener("change", () => {
   const f = $("#p-vfile").files[0];
-  if (f) $("#p-video").src = URL.createObjectURL(f);
+  if (!f) return;
+  // Ручной выбор остаётся запасным путём: запись клиента могла быть стёрта
+  // retention-очисткой, и тогда просмотр должен честно сказать об этом, а не
+  // притворяться сломанным.
+  _pmedia = URL.createObjectURL(f);
+  showMedia(f.type.startsWith("video") ? "video" : "audio", _pmedia, f.size);
 });
-$("#p-video").addEventListener("timeupdate", () => {
-  const tsec = $("#p-video").currentTime;
-  const c = cues.find(x => tsec >= x.start && tsec <= x.end);
-  $("#p-cue").textContent = c ? c.text : "";
+// The `close` event is the clean answer, but it is not the only one: a browser
+// that never fires it (or a dialog dismissed by Esc) must not leave the tape
+// playing behind a closed window — that is a stranger's meeting audio, audible.
+$("#player-dlg").addEventListener("close", stopPlayer);
+$("#player-dlg").addEventListener("cancel", stopPlayer);
+$("#player-close").addEventListener("click", () => {
+  stopPlayer();                          // stop first: close may not fire anywhere
+  $("#player-dlg").close();
 });
-$("#player-close").addEventListener("click", () => $("#player-dlg").close());
+
+function stopPlayer() {
+  hideMedia(); _pcues = []; _pjob = null; _pbytes = 0; _pnoteKey = ""; _pdemo = false;
+}
 $("#pay-close").addEventListener("click", () => $("#pay-dlg").close());
 
 // ─── pricing (landing) + top-up (studio) из /api/plans ───
@@ -2296,6 +2418,7 @@ window.onLangChange = () => {
     () => window.__jimlikRepaint?.(),
     () => window.__sozRepaint?.(),
     () => window.__nafisRepaint?.(),
+    () => window.__playerRepaint?.(),
     () => { if (_onbRelease) _onbRender(); }, // tour text is ours, not the dictionary's
   ];
   if (token) {

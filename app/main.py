@@ -6,7 +6,9 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -1340,6 +1342,184 @@ def download(jid: str, kind: str, user: dict = Depends(current_user)):
         raise HTTPException(404, "Artifact not ready")
     media = "audio/wav" if kind == "dubbing" else "text/plain; charset=utf-8"
     return FileResponse(path, media_type=media, filename=Path(path).name)
+
+
+# ---------- предпросмотр: медиа job'а и собранные карточки ----------
+# Студия умела отдавать файлы; посмотреть результат можно было только скачав их и
+# подобрав себе видеозапись вручную («p-vfile»). Просмотр, который требует от
+# клиента заново найти свой файл, — это работа, которую продукт и обязан снять.
+_MEDIA_EXT = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+              ".ogg": "audio/ogg", ".mp4": "video/mp4", ".mov": "video/quicktime"}
+_AUDIO_EXT = {".wav", ".mp3", ".m4a", ".ogg"}
+# Предпросмотр — экран, а не передача архива: потолка на число карточек и на число
+# слов хватает на весь законченный job (сегментов в подряде и так не больше 1500),
+# но не дают одному ответу разрастись до мегабайт JSON'а.
+_CAPTION_MAX_CUES = 1600
+_CAPTION_MAX_WORDS = 20_000
+
+
+def _num(x, default: float = 0.0) -> float:
+    """Конечное число или ничего: в этот JSON браузер кладёт тайминги подсветки."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _media_of(job: dict) -> dict | None:
+    """Медиа записи клиента: тип и размер, без пути на диске.
+
+    Путь не уходит наружу никогда (тот же закон, что у диагностики провайдеров);
+    MIME берётся из расширения сохранённого файла, которое выбрал сервер по
+    белосписку, а не из имени, присланного клиентом.
+    """
+    try:
+        src = Path(job["source_path"])
+        if not src.exists():
+            return None
+        ext, size = src.suffix.lower(), src.stat().st_size
+    except OSError:
+        return None
+    mime = _MEDIA_EXT.get(ext)
+    if not mime or size <= 0:
+        return None
+    return {"kind": "audio" if ext in _AUDIO_EXT else "video", "mime": mime,
+            "bytes": size}
+
+
+_CUE_TAG_RE = re.compile(r"^\[S(\d+)\]\s*")
+
+
+def _cue_tag(text: str) -> tuple[int | None, str]:
+    """Разделить метку диктора и то, что произносится: «[S1] Salom» → (1, «Salom»).
+
+    Метка — часть строки субтитра (её видно в файле и на burn-in), но в предпросмотре
+    для неё есть отдельное место: чип голоса. Пока метка остаётся в тексте, счётчик
+    слов считает скобки, а подсветка горит на служебном слове — то есть предпросмотр
+    показывает то, чего на ленте нет.
+    """
+    m = _CUE_TAG_RE.match(text or "")
+    if not m:
+        return None, text or ""
+    try:
+        speaker = int(m.group(1))
+    except ValueError:
+        return None, text or ""
+    return speaker, text[m.end():]
+
+
+def _caption_of(job: dict) -> dict:
+    """Карточки, слова и голоса одной задачей, из тех же артефактов, что скачивают.
+
+    Клиент умел читать SRT и раскрашивать слова только по пяти запросам и своему
+    парсеру таймкодов; здесь сборка идёт сервером, потому что тайминги слов —
+    результат движка, и пересобирать их в браузере значило бы иметь две
+    интерпретации одного файла.
+    """
+    jid = job["id"]
+    cues: list[dict] = []
+    path = db.get_artifact(jid, "srt")
+    truncated = False
+    total = 0
+    if path and Path(path).exists():
+        try:
+            parsed = srt_mod.parse_srt(Path(path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            parsed = []
+        total = len(parsed)
+        if total > _CAPTION_MAX_CUES:
+            parsed, truncated = parsed[:_CAPTION_MAX_CUES], True
+        rows = []
+        for c in parsed:
+            speaker, text = _cue_tag(c.text or "")
+            rows.append({"start": round(_num(c.start), 3),
+                         "end": round(_num(c.end), 3),
+                         "text": text[:600], "words": [], "speaker": speaker})
+        cues = rows
+    words = 0
+    wp = db.get_artifact(jid, "words")
+    if cues and wp and Path(wp).exists():
+        try:
+            report = json.loads(Path(wp).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            report = {}
+        by_index = {c.get("i"): c for c in (report.get("cues") or [])
+                    if isinstance(c, dict)}
+        for i, cue in enumerate(cues, start=1):
+            if words >= _CAPTION_MAX_WORDS:
+                truncated = True
+                break
+            item = by_index.get(i) or {}
+            taken = []
+            for w in (item.get("words") or []):
+                if words + len(taken) >= _CAPTION_MAX_WORDS:
+                    truncated = True
+                    break
+                if isinstance(w, dict) and w.get("w"):
+                    taken.append({"w": str(w["w"])[:120],
+                                  "s": round(_num(w.get("s")), 3),
+                                  "e": round(_num(w.get("e")), 3)})
+            cue["words"] = taken
+            words += len(taken)
+    dp = db.get_artifact(jid, "diarization")
+    if cues and dp and Path(dp).exists():
+        try:
+            dia = json.loads(Path(dp).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            dia = {}
+        # Голос привязывается по накрытию временем, а не по номеру карточки:
+        # диаризация считает реплики, вёрстка перекладывает карточки между ними,
+        # и любой кэш индексов после этого был бы догадкой.
+        lines = [l for l in (dia.get("lines") or []) if isinstance(l, dict)]
+        for cue in cues:
+            if cue["speaker"] is not None:
+                continue            # метка в строке — первичнее накрытия временем
+            best, score = None, 0.0
+            for line in lines:
+                ov = (min(_num(line.get("end")), cue["end"])
+                      - max(_num(line.get("start")), cue["start"]))
+                if ov > score:
+                    best, score = line, ov
+            if best is not None and score > 0:
+                speaker = best.get("speaker")
+                cue["speaker"] = speaker if isinstance(speaker, int) else None
+    meta = job.get("meta") or {}
+    return {"cues": cues, "media": _media_of(job), "count": len(cues),
+            "total": max(total, len(cues)),
+            "words": words, "karaoke": words > 0, "speakers": any(
+                c["speaker"] is not None for c in cues),
+            "demo": bool(meta.get("asr_demo")), "truncated": truncated}
+
+
+@app.get("/api/jobs/{jid}/caption", tags=["jobs"],
+         summary="Cues, word timings and speakers for the in-app preview")
+def job_caption(jid: str, user: dict = Depends(current_user)) -> dict:
+    job = db.get_job(jid)
+    if not job or job["user_id"] != user["id"]:
+        raise HTTPException(404, "Job not found")
+    return _caption_of(job)
+
+
+@app.get("/api/jobs/{jid}/media", tags=["jobs"],
+         summary="The uploaded recording, for the owner's preview only")
+def job_media(jid: str, user: dict = Depends(current_user)):
+    """Исходник job'а — только владельцу и только в студии.
+
+    Share-ссылка отдаёт результаты работы, а не чужую запись: исходное видео
+    человека, которое он загрузил, — не часть продукта, которую он разрешил
+    показывать всем, у кого есть ссылка.
+    """
+    job = db.get_job(jid)
+    if not job or job["user_id"] != user["id"]:
+        raise HTTPException(404, "Job not found")
+    info = _media_of(job)
+    if not info:
+        # Файл мог быть стёрт retention-очисткой: это 410, а не 500 и не путь к
+        # домашней папке сервера.
+        raise HTTPException(410, "Source media is gone, or was never playable "
+                                "audio/video")
+    return FileResponse(job["source_path"], media_type=info["mime"])
 
 
 # ---------- job sharing (public expiring links) ----------

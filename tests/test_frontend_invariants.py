@@ -820,6 +820,71 @@ def test_every_artifact_kind_keeps_its_real_file_extension():
         "the server's own filename is being ignored"
 
 
+def test_the_preview_is_built_from_the_engines_not_a_second_parser():
+    """One interpretation of a subtitle file.
+
+    The player used to re-parse SRT timecodes in JavaScript while the engine parsed
+    the same file in Python; two parsers of one format drift by a frame, and the
+    drift shows up as a highlight that leads the voice — the exact thing Ovoz So'z
+    is sold to prevent. Word timings now come from `/caption`, assembled by the
+    same module that measured them."""
+    assert "-->" not in JS, "a second SRT parser is back in the browser"
+    assert "parseSrtClient" not in JS, "the client-side parser is still wired"
+    body = JS[JS.index("async function openPlayer"):JS.index("function showMedia")]
+    assert "/caption" in body and "/media" in body, "the preview asks for neither"
+    assert '_pstats' in body, "word and voice counts are recomputed per frame"
+    stats = JS[JS.index("function paintStats"):JS.index("function paintWord")]
+    assert "_pstats.total" in stats, "the stats line counts a card without a total"
+
+
+def test_the_player_marks_up_both_media_kinds_and_repaints_on_language():
+    """A subtitle job is usually an audio job: a black `<video>` box for a voice
+    recording is the product telling the user it does not know what it just
+    processed. And a preview whose generated lines stay in yesterday's language is
+    the same bug as an unpainted log line."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    block = html[html.index('<dialog id="player-dlg"'):html.index("</dialog>",
+                                                                    html.index('id="player-dlg"'))]
+    for ident in ('id="p-video"', 'id="p-audio"', 'id="p-speaker"', 'id="p-meta"',
+                  'id="p-demo"'):
+        assert ident in block, f"the player markup lost {ident}"
+    assert block.count('hidden') >= 3, "elements are visible at once by default"
+    assert 'accept="video/*,audio/*"' in block, "a tape cannot be picked by hand"
+    # the language switch has to be inside the dialog: the app-level one sits under
+    # the modal layer, so a visitor who wants the preview in their language cannot
+    # reach it without closing what they were looking at
+    assert 'class="lang-switch"' in block, "no language switch inside the preview"
+    assert ' on' not in block and 'style=' not in block, "inline handler or style"
+    assert 'window.__playerRepaint' in JS, "the preview outlives a language switch"
+    assert "__playerRepaint?.()" in JS, "the repaint is not wired into the switch"
+    assert 'classList.toggle("on"' in JS, "word highlight is not driven by the engine"
+    assert '"S" + c.speaker' in JS and 'c.speaker + 1' not in JS, \
+        "the speaker chip invents a speaker: diarization counts from 1"
+    stop = JS[JS.index("function stopPlayer"):JS.index("function stopPlayer") + 300]
+    assert "hideMedia()" in stop, "closing the preview does not stop the tape"
+    wiring = JS[JS.index('$("#player-dlg").addEventListener'):
+                JS.index("function stopPlayer")]
+    assert '"close", stopPlayer' in wiring, "the tape outlives the close event"
+    assert '"cancel", stopPlayer' in wiring, "Esc leaves the tape playing"
+    assert "stopPlayer();" in JS[JS.index('$("#player-close")'):-1] or \
+        "stopPlayer();" in wiring, "the close button does not stop the tape"
+
+
+def test_the_preview_routes_are_owner_only_and_never_name_a_path():
+    """`/media` is the customer's raw upload: the ownership check is the whole
+    privacy story of this feature, and an error that echoes a server path turns a
+    404 into a map of the filesystem."""
+    src = (STATIC.parent / "app" / "main.py").read_text(encoding="utf-8")
+    for fn in ("def job_caption(", "def job_media("):
+        body = src[src.index(fn):src.index("\n@app.", src.index(fn))]
+        assert 'job["user_id"] != user["id"]' in body, f"{fn} has no owner check"
+        assert 'raise HTTPException(404, "Job not found")' in body
+    media = src[src.index("def job_media("):]
+    media = media[:media.index("\n\n# ")]
+    assert "filename=" not in media, "media is served as an attachment download"
+    assert '410' in media, "a purged source must not look like a missing job"
+
+
 def test_document_carries_no_executable_inline_script():
     """The CSP is only as strong as the document that lets it stay strict.
 
