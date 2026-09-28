@@ -72,11 +72,27 @@ def _clamp_segments(segments: list[Segment], billed_minutes: float) -> list[Segm
 
 
 def _ensure_wav(path: Path) -> None:
-    """TTS-адаптеры (edge-tts) пишут MP3 в файл с расширением .wav. Если внутри
-    не RIFF — конвертируем через ffmpeg в настоящий PCM WAV, иначе wave.open упадёт."""
+    """Гарантирует PCM 22050 Гц mono 16-bit, чтобы каждый байт микшера был реальной
+    секундой звука, а не единицей другой частоты. Sample rate — это масштаб
+    времени, а не качество.
+
+    Два режима сбоя, которые показывает живой голос и никогда не покажет заглушка:
+    MP3 с расширением .wav (не RIFF вовсе) и честный RIFF WAV, но с частотой 24 кГц
+    (у нейросетевых дикторов это норма). Прежняя версия лечила только первое, поэтому
+    реальная дорожка на 24 кГц попадала на сетку 22050 — даббинг играл на ~7% быстрее,
+    и каждая следующая реплика съезжала из своей паузы. Если заголовок уже ровно
+    22050/mono/16 — не трогаем; иначе нормализуем через ffmpeg.
+    """
     with open(path, "rb") as f:
-        if f.read(4) == b"RIFF":
-            return
+        is_riff = f.read(4) == b"RIFF"
+    if is_riff:
+        try:
+            with wave.open(str(path), "rb") as w:
+                if (w.getnchannels() == 1 and w.getsampwidth() == 2
+                        and w.getframerate() == 22050):
+                    return
+        except wave.Error:
+            pass  # RIFF, но не разборный PCM (float/экзотика) — нормализуем ниже
     tmp = path.with_suffix(".pcm.wav")
     subprocess.run(
         [settings.ffmpeg_bin, "-y", "-v", "error", "-i", str(path),
@@ -768,22 +784,72 @@ def _execute(job: dict, deadline: float = 0) -> None:
         _check_deadline()
         tts = get_tts()
         db.add_job_event(jid, "tts", f"{tts.name}: {len(translated)} lines")
-        _mix_dubbing(jid, translated, tts, tgt, art)
+        rep = _mix_dubbing(jid, translated, tts, tgt, art)
+        # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
+        # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую
+        # нарезку. Числа финитные; путь файла наружу не идёт.
+        if rep["shifted"]:
+            note = (f"retimed: {rep['shifted']} of {rep['lines']} voices moved so none "
+                    f"overlap (drift {rep['drift_sec']:.1f}s, total {rep['total_sec']:.1f}s)")
+            if rep["clipped"]:
+                note += ", tail clipped at the paid ceiling"
+            db.add_job_event(jid, "tts", note)
 
 
-def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) -> None:
-    total = max((s.end for s in translated), default=1.0)
+def _dub_schedule(segments: list[Segment], actuals: list[float],
+                  cap_sec: float) -> tuple[list[float], float, bool]:
+    """Куда встать каждому голосу, чтобы ни два не звучали одновременно.
+
+    Реплика даббинга не должна накладываться на предыдущий голос лишь потому, что её
+    окно в транскрипте было коротким: нейросетевая фраза длиннее паузы, которую
+    transcript под неё зарезервировал. Ставим реплику на её cue-старт, только если
+    предыдущий голос уже закончился, иначе — сразу за ним; порядок хранится, наложения
+    нет. На хорошо подогнанном звуке (заглушка или голос, уложившийся в бюджет) это
+    в точности воспроизводит cue-хронологию, поэтому для того, что и было верно,
+    изменение невидимо.
+
+    `cap_sec` — жёсткий потолок длины дорожки. Прежний микшер мерял буфер по
+    max(seg.end), который уже ограничен биллингом; сдвиг голосов может раздуть его
+    произвольно (провайдер, у которого каждая фраза втрое длиннее окна, — это OOM).
+    Хвост за потолком обрезается, и это возвращается честным `clipped`, а не молча.
+    """
+    starts: list[float] = []
+    head = 0.0
+    for s, dur in zip(segments, actuals):
+        start = max(s.start, head)
+        starts.append(start)
+        head = start + max(0.0, dur)
+    total = max(head, max((s.end for s in segments), default=0.0), 1.0)
+    clipped = total > cap_sec
+    return starts, min(total, cap_sec), clipped
+
+
+def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) -> dict:
     rate = 22050
-    samples = bytearray(int(total * rate) * 2)  # 16-bit mono
-
+    # Сначала слушаем каждую реплика: буфер нельзя размерять по max(s.end), когда
+    # реальный голос длиннее окна, — иначе хвост молча обрезается (break в микшере).
+    voices: list[bytes] = []
+    actuals: list[float] = []
     for s in translated:
         tmp = art / f"line_{int(s.start * 1000)}.wav"
         tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start)
-        _ensure_wav(tmp)  # edge-tts отдаёт MP3 в .wav — приведём к честному PCM
+        _ensure_wav(tmp)  # now guarantees 22050 mono 16-bit PCM
         with wave.open(str(tmp), "rb") as w:
             data = w.readframes(w.getnframes())
-        # простая нормализация: подмешиваем с позиции start (по верхнему пределу)
-        offset = int(s.start * rate) * 2
+            sr = w.getframerate()
+        # _ensure_wav привёл к 22050; длительность считаем по фреймам и rate.
+        actuals.append(len(data) / 2.0 / (sr or rate))
+        voices.append(data)
+        tmp.unlink(missing_ok=True)
+
+    span = max((s.end for s in translated), default=1.0)
+    # Потолок памяти: даб может раздвинуться, но не безобразно. Вдвое длиннее
+    # оплаченной ленты + запас — это всё, что микшер выделит.
+    cap_sec = span * 2.0 + TIMELINE_SLACK_SEC
+    starts, total, clipped = _dub_schedule(translated, actuals, cap_sec)
+    samples = bytearray(int(total * rate) * 2)  # 16-bit mono
+    for start, data in zip(starts, voices):
+        offset = int(start * rate) * 2
         for i in range(0, len(data) - 1, 2):
             pos = offset + i
             if pos + 1 >= len(samples):
@@ -792,7 +858,6 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) 
             add = int.from_bytes(data[i:i + 2], "little", signed=True)
             mixed = max(-32768, min(32767, cur + add))
             samples[pos:pos + 2] = mixed.to_bytes(2, "little", signed=True)
-        tmp.unlink(missing_ok=True)
 
     out = art / "dubbing.wav"
     with wave.open(str(out), "w") as w:
@@ -801,3 +866,9 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path) 
         w.setframerate(rate)
         w.writeframes(bytes(samples))
     db.add_artifact(jid, "dubbing", str(out))
+    # Честный отчёт: сколько голосов пришлось сдвинуть, и был ли обрезан хвост.
+    shifted = sum(1 for s, st in zip(translated, starts) if st > s.start + 1e-6)
+    drift = max((st + d - s.end for s, st, d in zip(translated, starts, actuals)),
+                default=0.0)
+    return {"lines": len(translated), "shifted": shifted, "clipped": clipped,
+            "drift_sec": round(drift, 3), "total_sec": round(total, 3)}
