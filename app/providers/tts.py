@@ -38,14 +38,20 @@ class StubTTS:
 
 
 class EdgeTTS:
-    """Реальный TTS через Microsoft Edge neural voices (uz-MM-AtiyeNeural и др.)."""
+    """Реальный TTS через Microsoft Edge neural voices. Голоса подобраны живым
+    `--list-voices`: у Microsoft единственный узбекский локат — `uz-UZ` (Madina
+    женский, Sardor мужской). Прежнее `uz-MM-AtiyeNeural` не существовало: локат
+    `MM` выдуман, имени `Atiye` нет, и каждый реальный узбекский даббинг падал на
+    `NoAudioReceived`. Слоты времени речи не выдумываем — берём то, что отдаёт API."""
 
     VOICES = {
-        "uz": "uz-MM-AtiyeNeural",
+        "uz": "uz-UZ-MadinaNeural",
+        "uz_male": "uz-UZ-SardorNeural",
         "ru": "ru-RU-SvetlanaNeural",
         "en": "en-US-JennyNeural",
     }
-
+    # Only the three shipped UI languages get a first-class key; anything else
+    # falls back to Russian rather than inventing a voice id that 404s.
     name = "edge-tts"
 
     def synthesize(self, text: str, lang: str, out_path: Path, dur_sec: float) -> None:
