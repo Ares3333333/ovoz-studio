@@ -1057,9 +1057,20 @@ def delete_webhook(uid: str, wid: str) -> bool:
 
 
 def get_active_webhooks(uid: str, event: str) -> list[dict]:
-    """Return active webhooks subscribed to a specific event."""
+    """Return active webhooks subscribed to a specific event.
+
+    `events` must be in the SELECT *and* split, not just referenced: the earlier
+    version read `r["events"]` on a row that never selected it, so this raised on
+    every call, `_fire_webhooks` swallowed it, and the paid Studio feature silently
+    delivered nothing. Subscriptions are stored as a CSV ("job.done,job.failed").
+    """
     rows = get_conn().execute(
-        "SELECT url, secret FROM webhooks WHERE user_id=? AND active=1",
+        "SELECT url, secret, events FROM webhooks WHERE user_id=? AND active=1",
         (uid,),
     ).fetchall()
-    return [dict(r) for r in rows if event in r["events"]]
+    out: list[dict] = []
+    for r in rows:
+        subs = {e.strip() for e in (r["events"] or "").split(",") if e.strip()}
+        if event in subs:
+            out.append({"url": r["url"], "secret": r["secret"]})
+    return out
