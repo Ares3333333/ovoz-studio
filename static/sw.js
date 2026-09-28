@@ -7,7 +7,7 @@
  *   – API calls: network-first, cache fallback only for GET /api/plans, /api/v1/info
  *   – Everything else: network-only (no cache poisoning)
  * ──────────────────────────────────────────────────────────────────── */
-const BUILD = '0.29.0';
+const BUILD = '0.29.1';
 const VERSION = 'ovoz-v' + BUILD;
 const SHELL_CACHE = VERSION + '-shell';
 const API_CACHE = VERSION + '-api';
@@ -30,9 +30,13 @@ const PRECACHE_URLS = [
 
 // ─── Install: precache shell ───
 self.addEventListener('install', (event) => {
+  // allSettled, не addAll: addAll отказывает целиком при одном не-200 из шести
+  // URL (редирект на /manifest.webmanifest, 502 во время деплоя) — skipWaiting не
+  // запускался, sw-boot проглатывал ошибку, и продукт оставался ВООБЩЕ без
+  // service worker: все offline-обещания пусты при чистом консоли (аудит, F6).
   event.waitUntil(
     caches.open(SHELL_CACHE)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
+      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((u) => cache.add(u))))
       .then(() => self.skipWaiting())
   );
 });
@@ -117,7 +121,14 @@ async function networkFirst(request, cacheName) {
     }
     return response;
   } catch {
-    const cached = await cache.match(request);
+    let cached = await cache.match(request);
+    if (!cached && cacheName === SHELL_CACHE) {
+      // Документ кэширован под старым билдом и просит свои старые ?v= ассеты,
+      // которые pruneAndPut уже удалил: точный промах — и страница JS ловит 503
+      // с текстом 'Offline', SPA не стартует, белый экран офлайн (аудит, F5).
+      // Отдаём тот же путь из любого кэшированного билда.
+      cached = await cache.match(request, { ignoreSearch: true });
+    }
     if (cached) return cached;
     // Offline fallback for navigations
     if (request.mode === 'navigate') {

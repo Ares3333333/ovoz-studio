@@ -1424,8 +1424,22 @@ function _openWS(ticket) {
       // WS connected: stop polling if active
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     };
+    // Живость: сервер шлёт ping каждые 30 с. Любой кадр — ping или событие —
+    // доказывает путь жив; 90 с без единого кадра доказывают обратное, даже
+    // когда readyState упрямо говорит OPEN (half-open после смены сети,
+    // idle-close прокси, фона iOS: onclose не приходит вообще). Тогда progress
+    // замерает навсегда; этот смотритель закрывает сам — закрытие возвращает
+    // machinery редизола и polling в игру.
+    let lastRx = Date.now();
+    const liveness = setInterval(() => {
+      if (!mine()) { clearInterval(liveness); return; }
+      if (ws.readyState === WebSocket.OPEN && Date.now() - lastRx > 90000) {
+        try { ws.close(); } catch {}
+      }
+    }, 15000);
     ws.onmessage = (ev) => {
       if (!mine()) return; // an orphaned socket must not drive the UI twice
+      lastRx = Date.now(); // any frame is a heartbeat, ping counts too
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "connected" || msg.type === "ping") return;
@@ -1434,14 +1448,17 @@ function _openWS(ticket) {
     };
     ws.onclose = () => {
       clearTimeout(watchdog);
+      clearInterval(liveness);
       if (!mine()) return; // a late close from a superseded socket
       _ws = null;
       if (!token) return;  // signed out: nothing to watch, nothing to redial
       ensurePolling(); // keep the UI live while we wait to retry
-      // Exponential backoff reconnect: 2s, 4s, 8s, max 30s — and only while it
-      // is worth watching, so a WS-less host doesn't dial forever.
-      if (_wsReconnectAttempt < WS_MAX_RECONNECTS && _allJobs.some(isActiveJob)
-          && !_wsReconnectTimer) {
+      // Exponential backoff reconnect: 2s, 4s, 8s, max 30s. Условия — только
+      // «подписан и потолок попыток»: локальный список задач не годится, при
+      // фильтре или ещё не загруженном списке клиент замолкал навсегда (аудит
+      // рои, F4). Cost stays bounded by WS_MAX_RECONNECTS, polling covers the
+      // meanwhile, and a fresh user action re-dials via startPolling anyway.
+      if (_wsReconnectAttempt < WS_MAX_RECONNECTS && !_wsReconnectTimer) {
         const delay = Math.min(2000 * Math.pow(2, _wsReconnectAttempt), 30000);
         _wsReconnectAttempt++;
         _wsReconnectTimer = setTimeout(() => {

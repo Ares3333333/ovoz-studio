@@ -194,10 +194,49 @@ def test_ws_open_stops_polling_and_cancels_pending_redial():
 
 def test_no_infinite_reconnect_and_no_anonymous_dial():
     assert "WS_MAX_RECONNECTS" in JS, "backoff has no ceiling"
-    assert "_allJobs.some(isActiveJob)" in _handler_body("onclose"), \
-        "reconnects continue after the last job settled"
+    # Round-35 swarm audit (F4): the old gate defended a real bug — reconnect
+    # conditioned on the local job list means a filtered view or a not-yet-
+    # fetched list silences the client forever while a job runs server-side.
+    # The bound is the attempts ceiling plus the signed-out early return.
+    assert "_allJobs.some(isActiveJob)" not in _handler_body("onclose"), \
+        "reconnect must not depend on local job contents"
     assert "if (!token) return;" in _fn_body("startPolling")
     assert re.search(r"if \(!token \|\| pollTimer\) return;", _fn_body("ensurePolling"))
+
+
+def test_half_open_socket_is_killed_by_liveness_not_by_close_events():
+    """Audit F3: after a network change or an iOS background-kill the socket is
+    half-open — readyState stays OPEN and onclose never fires, so every
+    self-healing path below it is unreachable and progress freezes at 40%.
+    Liveness must be proven by FRAMES (pings count), and 90 s of silence must
+    force the close that re-arms the machinery."""
+    body = _fn_body("_openWS")
+    assert "lastRx = Date.now();" in _handler_body("onmessage"), \
+        "incoming frames do not stamp liveness"
+    assert "Date.now() - lastRx > 90000" in body, \
+        "three missed 30 s server pings must force a close"
+    assert "clearInterval(liveness)" in _handler_body("onclose"), \
+        "the watchdog of a dead socket must not leak"
+
+
+def test_precache_installs_even_when_one_url_fails():
+    """Audit F6: cache.addAll is all-or-nothing — a single non-200 (edge rule,
+    deploy 502) rejected the whole install, skipWaiting never ran, and the
+    product silently had no service worker at all."""
+    install = SW[SW.index("addEventListener('install'"):SW.index("addEventListener('activate'")]
+    assert "Promise.allSettled" in install, \
+        "install must not be defeated by one failing precache URL"
+    assert "cache.addAll" not in install
+
+
+def test_code_assets_fall_back_across_build_stamps_offline():
+    """Audit F5: pruneAndPut deletes superseded ?v= keys, so an old cached
+    document requesting its old assets hits an exact-match miss and used to
+    get 503-'Offline' as JavaScript — a white screen offline after any deploy.
+    Shell/code requests must retry the cache ignoring the query string."""
+    fn = SW[SW.index("async function networkFirst"):SW.index("async function pruneAndPut")]
+    assert "ignoreSearch: true" in fn, \
+        "stale stamped asset requests must resolve to any cached build"
 
 
 def test_websocket_handshake_uses_a_ticket_not_the_session_token():
