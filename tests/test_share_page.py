@@ -162,18 +162,21 @@ def test_expired_and_missing_links_answer_html_too(client, shared, auth):
     j = client.get("/s/nosuchid")
     assert j.status_code == 404 and j.json()["error_code"] == "not_found"
 
-    jid = shared["job"]["id"]
     sid = shared["url"].rsplit("/", 1)[-1]
     conn = db.get_conn()
     conn.execute("UPDATE shares SET expires_at = ? WHERE id = ?",
                  ("2000-01-01T00:00:00+00:00", sid))
     conn.commit()
     gone = client.get(shared["url"], headers=HTML)
-    assert gone.status_code == 410 and "истёк" in gone.text or "tugagan" in gone.text
-    assert client.get(shared["url"]).status_code == 410
+    assert gone.status_code == 410
+    assert ("истёк" in gone.text) or ("tugagan" in gone.text), gone.text[:200]
+    # Round 27 deliberately splits the generic `gone` into specific codes: an
+    # integrator can tell an expired link from a download-capped one. That is the
+    # whole point of the JSON half, so it is pinned here rather than left implicit.
+    gj = client.get(shared["url"])
+    assert gj.status_code == 410 and gj.json()["error_code"] == "share_expired", gj.text
     assert client.get(f"{shared['url']}/dl/srt").status_code == 410, \
         "an expired link must not keep serving files"
-    assert jid
 
 
 def test_the_share_page_carries_the_same_security_headers(client, shared):
