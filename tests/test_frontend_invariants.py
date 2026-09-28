@@ -770,6 +770,56 @@ def test_code_assets_are_build_stamped_in_the_document():
     assert m and m.group(1) == app_pkg.__version__, "sw.js BUILD must equal app version"
 
 
+def test_service_worker_answers_a_build_question_and_the_page_asks_it():
+    """Announcing on activate is only half a protocol.
+
+    A tab that boots on top of an already-active worker of another build never sees
+    an activate event, and a tab that is never navigated never asks the network
+    either — browser QA lived through exactly that: the server had shipped a new
+    release, the tab still executed the old one, and nothing fixed it until a human
+    reloaded. So the page must ask, and the worker must answer; a one-way "we notify
+    you" is the bug, not the mitigation."""
+    boot = (STATIC / "sw-boot.js").read_text(encoding="utf-8")
+    assert '"whatBuild"' in boot, "the page never asks which build owns it"
+    assert "reg.update" in boot, "a background tab is never told to re-check"
+    assert "adoptBuild" in boot, "the reload decision is not shared by both paths"
+    assert "function adoptBuild" in boot, "the reload decision is not shared by both paths"
+    assert "sessionStorage" in boot, "a mismatching build must not reload in a loop"
+    assert "'whatBuild'" in SW, "the worker does not answer the page's question"
+    assert "'build:' + BUILD" in SW, "the answer must carry the worker's own build"
+
+
+def test_landing_deep_links_do_not_land_in_a_hidden_page():
+    """`#ling` shared while the studio is open is a real URL a person will use.
+
+    Every target section lives on the landing page, which is `display:none` at that
+    moment: with no branch for it the visitor got a studio and a changed address bar,
+    which reads as a broken link on a marketing page."""
+    body = JS[JS.index('addEventListener("hashchange"'):]
+    body = body[:body.index("\n", body.index("});"))]
+    assert 'h !== "#studio"' in body, "a landing deep link is ignored in the studio"
+    assert "showLanding()" in body and "scrollIntoView" in body
+
+
+def test_every_artifact_kind_keeps_its_real_file_extension():
+    """A chip that downloads `align-<id>.txt` for a JSON report is a file a person
+    cannot open in a player or tell from a transcript.
+
+    The server names the file (`Content-Disposition`), and the client map is the
+    fallback — derived from the server's own tuple, so a kind added there without an
+    extension fails here instead of shipping as a `.txt`."""
+    from app.main import _JOB_ARTIFACT_KINDS
+    m = re.search(r"const DL_EXT = \{(.*?)\n\};", JS, re.S)
+    assert m, "the artifact extension map is gone"
+    table = dict(re.findall(r"(\w+):\s*" + '"([.][a-z0-9]+)"', m.group(1)))
+    missing = set(_JOB_ARTIFACT_KINDS) - set(table)
+    assert not missing, f"artifact kinds with no extension: {sorted(missing)}"
+    for kind in ("align", "words", "diarization", "layout"):
+        assert table.get(kind) == ".json", f"{kind} is JSON, mapped as {table.get(kind)}"
+    assert "dlName(" in JS and 'resp.headers.get("Content-Disposition")' in JS, \
+        "the server's own filename is being ignored"
+
+
 def test_document_carries_no_executable_inline_script():
     """The CSP is only as strong as the document that lets it stay strict.
 

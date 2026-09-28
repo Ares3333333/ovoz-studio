@@ -464,6 +464,14 @@ class Envelope:
         carried = len(self._carry) // 2          # whole samples already counted
         buf = self._carry + bytes(raw)
         avail = len(buf) // 2                     # whole 16-bit samples in hand
+        # Refused first, accounted after. A pass that says "I will not hold that"
+        # must not have already added it to the tape it claims to have measured:
+        # `peak_samples` is the memory number the job's ceiling is priced against,
+        # and it may not exceed the very promise the same call just enforced.
+        if avail > int(self.block_sec * self.rate) + self.frame_len:
+            raise AlignError(
+                f"block of {avail / self.rate:.1f} s exceeds the {self.block_sec:.1f} s "
+                f"window this pass promised to hold", "bad_block")
         # Only what arrived this time lengthens the tape. The carry is re-read on
         # every feed because a frame has to be finished before it can be measured,
         # and a duration that counted those samples twice would put the end-of-tape
@@ -471,10 +479,6 @@ class Envelope:
         self.samples += avail - carried
         if avail > self.peak_samples:
             self.peak_samples = avail
-        if avail > int(self.block_sec * self.rate) + self.frame_len:
-            raise AlignError(
-                f"block of {avail / self.rate:.1f} s exceeds the {self.block_sec:.1f} s "
-                f"window this pass promised to hold", "bad_block")
         done = avail // self.frame_len            # only whole frames get measured
         cut = done * self.frame_len * 2
         body, self._carry = buf[:cut], buf[cut:]
@@ -600,9 +604,17 @@ class _GapIndex:
         return idx if ok else None
 
     def at(self, t: float) -> int:
-        """The pause whose legal stretch already contains `t`, or -1."""
+        """The pause whose legal stretch already contains `t`, or -1.
+
+        The stretch must be *open*: a pause of exactly `MIN_GAP_SEC` is legal as a
+        pause and empty as a place to put a cut (`BOUNDARY_PAD` eats it from both
+        ends), so `_target` refuses it — and an index that reported it as "the cut
+        is already in silence" would give the customer a different count than the
+        sweep does. Same law, checked the same way."""
         k = bisect.bisect_right(self.a, t) - 1
-        return k if k >= 0 and t <= self.b[k] else -1
+        if k < 0 or self.a[k] >= self.b[k] or t > self.b[k]:
+            return -1
+        return k
 
     def window(self, lo: float, hi: float) -> tuple[int, int]:
         """Half-open index range of pauses that can put a cut inside [lo, hi]."""
@@ -812,7 +824,11 @@ def align_curve(cues: list[Cue], curve: dict,
         "audio": {"sample_rate": curve["sample_rate"], "duration": duration,
                   "frames": read["frames"], "speech_sec": read["speech_sec"],
                   "silence_sec": read["silence_sec"], "gaps": len(gaps),
-                  "window_sec": MAX_LISTEN_SEC,
+                  # What a single call agrees to hold in hand. For a streamed pass
+                  # that number IS the block, and quoting 900 s beside a
+                  # `heard_sec` of 3600 s would be an artifact contradicting its own
+                  # measurement — the ceiling people read.
+                  "window_sec": curve.get("block_sec", MAX_LISTEN_SEC),
                   # How this answer was heard, not only what it found: a tape that
                   # arrived in blocks says so, and says how big a piece of it was
                   # ever in hand. `duration` alone would let an hour of tape look

@@ -601,6 +601,25 @@ def test_a_refused_step_says_why_in_a_token_not_in_prose(client, auth):
     assert line["data"] == {"code": "skipped", "reason": "no_audio"}, line
 
 
+def test_the_listening_ceiling_sits_above_the_upload_ceiling():
+    """Two numbers in two files promise a client one thing, and the promise is only
+    true while the order holds: a job may never be refused material it paid for.
+
+    If `MAX_JOB_TAPE_SEC` ever drops below the upload's own timeline cap, the
+    truncation sentence stops being a corner case for lying containers and becomes a
+    ordinary tax on paid minutes — which is the defect this release removed. This
+    gate is the difference between documenting that and noticing it."""
+    from app import main, pipeline
+    assert pipeline.MAX_JOB_TAPE_SEC >= main.MAX_JOB_TIMELINE_SEC, (
+        f"jobs can be bought past the listening ceiling: "
+        f"{pipeline.MAX_JOB_TAPE_SEC} < {main.MAX_JOB_TIMELINE_SEC}")
+    # And the sentence itself: it fires only when the ceiling ate paid time, never
+    # when the tape simply ended before the credit did.
+    assert pipeline._heard_report(3600.0, 3600.0, 7200.0)[0] != {}, "ceiling bound"
+    assert pipeline._heard_report(1800.0, 1860.0, 1800.0) == ({}, ""), \
+        "a tape that ends inside its own paid timeline is not a loss"
+
+
 def test_a_short_job_promises_nothing_it_did_not_run_out_of(client, auth, monkeypatch):
     """The note is a claim about a limit, so it must be absent whenever the paid
     timeline — not the ceiling — is what stopped the listening."""
@@ -1015,11 +1034,20 @@ def test_the_listening_stops_where_the_money_stops_and_not_a_frame_later():
         pos += len(out)
         return out
 
-    tape = pipeline._drain(read, block_cues(900), 5.0)      # five minutes bought
+    tape = pipeline._drain(read, 5.0)                       # five minutes bought
     assert tape["heard_sec"] == 360.0, tape["heard_sec"]    # paid plus the slack
     assert tape["blocks"] == 360 / pipeline.LISTEN_BLOCK_SEC, tape["blocks"]
     assert sum(got) / 2 / RATE <= 360.0 + 1e-9, "the pass read past its ceiling"
     assert tape["truncation"] == {}, "a tape longer than the paid timeline is not a loss"
+    # A ceiling that is not a multiple of the block is where the last read used to
+    # overshoot: the request must be cut to the remaining budget, or `heard_sec`
+    # contradicts `reach_sec` by up to a whole block (59 s) — and the truncation
+    # sentence below rests on that number.
+    got.clear()
+    pos = 0
+    edge = pipeline._drain(read, 3.0)                       # 180 + 60 slack = 240 s
+    assert edge["heard_sec"] == edge["reach_sec"] == 240.0, edge
+    assert sum(got) / 2 / RATE == 240.0, "the tail read went past the budget"
     # A tape shorter than the credit was heard whole: silence is honest here.
     short = listening(long_tape(120), block_cues(120), 20.0)
     assert short["heard_sec"] == 120.0 and short["truncation"] == {}, short
@@ -1086,47 +1114,68 @@ def test_a_text_job_without_the_flag_is_never_retimed(client, auth):
     assert {e["step"] for e in db.job_timeline(job["id"])}.isdisjoint({"align"})
 
 
-def test_one_listening_of_the_tape_serves_every_engine_that_hears(client, auth, monkeypatch):
-    """Align, diarize and words all hear the same audio; they must not each queue
-    their own ffmpeg.
+def test_one_curve_per_job_and_profiles_after_the_aligner(client, auth, monkeypatch):
+    """Align, So'z and the diarizer all hear the same audio; the curve is measured
+    once, and the voice profiles are collected from the timeline the aligner
+    finished writing.
 
     Decoding per feature is not merely slower, it is two windows over the same job
-    that can disagree: the aligner would retime cues against one rendition of the
-    tape while the diarizer profiled another, and the report would still claim both
-    are facts about the recording the customer uploaded."""
+    that can disagree — and the second disagreement is real: a profile window taken
+    from the ASR timeline sits partly outside the cue Jimlik has already moved,
+    which blends two speakers into one fingerprint and lets the diarizer argue from
+    evidence the aligner cancelled. So the pass is bounded, not rewound: one decode
+    for the curve, one for the profiles, and never a buffer a step keeps for itself.
+    """
     from app import db, pipeline as pl
+    from audio_studio import listening
 
-    seen = []
-    real = pl._tape_pass
+    heard = listening(long_tape(60), block_cues(60), 1.0)
+    assert heard is not None and "curve" in heard, heard
+    curves, profiles = [], []
 
-    def counting(source, segments, billed, deadline=0.0):
-        seen.append(Path(source).name)
-        return real(source, segments, billed, deadline)
+    # A text upload has no audio, so the real pass would answer None and the
+    # diarizer would correctly take the text-only branch. The curve is therefore
+    # supplied — measured by the production `_drain`, just not through ffmpeg.
+    def fake_curve(source, billed, deadline=0.0, **kw):
+        curves.append(Path(source).name)
+        return dict(heard)
 
-    monkeypatch.setattr(pl, "_tape_pass", counting)
+    def counting_profiles(source, segments, billed, deadline=0.0):
+        profiles.append([round(s.start, 3) for s in segments])
+        return {"voices": [None] * len(segments), "off_tape": 0,
+                "heard_sec": heard["heard_sec"], "note": "", "truncation": {}}
+
+    monkeypatch.setattr(pl, "_tape_pass", fake_curve)
+    monkeypatch.setattr(pl, "_profiles_pass", counting_profiles)
     r = client.post("/api/jobs", headers=auth,
                     files={"file": ("interview.srt", format_srt(CRUSHED).encode(),
                                     "text/plain")},
                     data={"jtype": "subtitles", "src": "uz", "tgt": "ru",
-                          "align": "1", "diarize": "1"})
+                          "align": "1", "diarize": "1", "words": "1"})
     assert r.status_code == 201, r.text
     job = r.json()["job"]
     steps = {e["step"] for e in db.job_timeline(job["id"])}
-    assert {"align", "diarize"} <= steps, steps
-    assert len(seen) == 1, f"the tape was decoded {len(seen)} times: {seen}"
+    assert {"align", "diarize", "words"} <= steps, steps
+    assert len(curves) == 1, f"the curve was measured {len(curves)} times"
+    assert len(profiles) == 1, f"profiles collected {len(profiles)} times"
+    # The profiles were asked for the ALIGNED timeline, not the raw ASR one.
+    timeline = db.job_timeline(job["id"])
+    aligned = [e for e in timeline if e["step"] == "align"][-1]
+    assert aligned["data"]["code"] in ("aligned", "skipped"), aligned["data"]
+    assert profiles[0], "the diarizer got no cue windows at all"
 
 
-def test_no_pipeline_step_decodes_the_tape_on_the_side():
-    """The behavioural test above can only see the flags it turns on together. This
-    one is the rule for every step that has not been written yet: the tape reaches
-    the engines as the pass `_execute` already ran, never as a fresh subprocess."""
+def test_the_tape_is_never_held_by_a_step():
+    """The rule for every step that has not been written yet: the tape reaches the
+    engines as the pass `_execute` already ran, never as a fresh subprocess."""
     import inspect
 
     from app import pipeline as pl
 
     body = inspect.getsource(pl._execute)
     assert body.count("_tape_pass(") == 1, \
-        "_execute must listen through _tape_pass exactly once and pass the result on"
+        "_execute must measure one curve, through _tape_pass, and pass it on"
+    assert "_profiles_pass(" in body, "diarization must hear the aligned timeline"
     for fn in (pl._execute, pl._align_step, pl._words_step):
         step = inspect.getsource(fn)
         for side in ("_pcm(", "Popen", "subprocess."):
@@ -1398,7 +1447,10 @@ def test_the_index_answers_exactly_what_the_sweep_answers():
         pos, gaps = 0.0, []
         while pos < 300.0:
             start = pos + rnd.uniform(0.0, 0.4)
-            gaps.append(A.Gap(round(start, 3), round(start + rnd.uniform(0.05, 0.9), 3)))
+            gaps.append(A.Gap(round(start, 3),
+                              round(start + rnd.choice([A.MIN_GAP_SEC,
+                                                       rnd.uniform(0.06, 0.9),
+                                                       rnd.uniform(0.9, 3.0)]), 3)))
             pos = gaps[-1].end + rnd.uniform(0.1, 3.0)
         idx = A._GapIndex.build(gaps)
         assert idx is not None, "a legal pause list lost its index"
@@ -1434,6 +1486,62 @@ def test_the_report_is_identical_with_the_index_switched_off(monkeypatch):
     assert fast == slow
 
 
+def test_a_profile_window_is_taken_from_the_timeline_the_aligner_wrote(client, auth,
+                                                                       monkeypatch):
+    """The order is the claim. Round 25 moved voice profiles into the same stream as
+    the curve, and that silently put them on the ASR timeline — while `analyze_turns`
+    pairs each profile with the cue Jimlik has already moved by up to
+    `ALIGN_MAX_SHIFT_SEC`. A window can sit 60% outside its own cue and still print
+    three confident numbers, so this test does not check numbers: it asks which
+    segments the profile pass was handed.
+
+    The tape here is a real curve built without ffmpeg, and the profile answer is
+    synthetic: the only thing under test is the handover between the two steps."""
+    from app import db, pipeline as pl
+    from audio_studio import listening
+
+    heard = listening(long_tape(60), block_cues(60), 1.0)
+    assert heard is not None and "curve" in heard, heard
+    monkeypatch.setattr(pl, "_tape_pass",
+                        lambda source, billed, deadline=0.0, **kw: dict(heard))
+
+    asked: list[list[float]] = []
+
+    def watching(source, segments, billed, deadline=0.0):
+        asked.append([round(s.start, 3) for s in segments])
+        return {"voices": [None] * len(segments), "off_tape": 0,
+                "heard_sec": 60.0, "note": "", "truncation": {}}
+
+    shifted: list[list[float]] = []
+    real_align = pl._align_step
+
+    def lying_align(jid, tape, segments):
+        out = real_align(jid, tape, segments)
+        # Every cut moves: the diarizer must now hear the moved timeline, not this one.
+        moved = [pl.Segment(s.start + 0.4, s.end + 0.4, s.text) for s in out]
+        shifted.append([round(s.start, 3) for s in moved])
+        return moved
+
+    monkeypatch.setattr(pl, "_profiles_pass", watching)
+    monkeypatch.setattr(pl, "_align_step", lying_align)
+    r = client.post("/api/jobs", headers=auth,
+                    files={"file": ("interview.srt", format_srt(CRUSHED).encode(),
+                                    "text/plain")},
+                    data={"jtype": "subtitles", "src": "uz", "tgt": "ru",
+                          "align": "1", "diarize": "1"})
+    assert r.status_code == 201, r.text
+    job = r.json()["job"]
+    steps = {e["step"] for e in db.job_timeline(job["id"])}
+    assert {"align", "diarize"} <= steps, steps
+    assert asked and shifted, "the profile pass never ran"
+    assert asked[0] == shifted[0], (
+        "the diarizer was handed a timeline that is not the one the aligner wrote: "
+        f"{asked[0][:4]} vs {shifted[0][:4]}")
+    # …and the diarize row says where its profiles came from, in numbers.
+    line = [e for e in db.job_timeline(job["id"]) if e["step"] == "diarize"][-1]
+    assert line["data"]["code"] == "turns" and line["data"]["heard_sec"] == 60.0, line
+
+
 def test_a_deadline_between_blocks_wakes_the_job_instead_of_losing_it():
     """`_drain` checks the wall clock where a hung ffmpeg would otherwise sit: a
     cooperative timeout that never regains control is not a timeout."""
@@ -1443,5 +1551,95 @@ def test_a_deadline_between_blocks_wakes_the_job_instead_of_losing_it():
         return b"\x00" * nbytes
 
     with pytest.raises(TimeoutError):
-        pl._drain(endless, block_cues(600), 10.0, deadline=time.monotonic() - 1.0)
+        pl._drain(endless, 10.0, deadline=time.monotonic() - 1.0)
+
+
+def test_a_hung_pipe_is_killed_before_it_is_closed(monkeypatch):
+    """`close()` on a pipe a worker is still reading waits for that worker, and the
+    worker waits for ffmpeg: the promised read timeout then returns nothing at all.
+    Measured on the old order — 98,8 s of cleanup for a 1 s timeout — which leaves
+    the job `running` with no refund, keeps the child decoding, and hangs server
+    shutdown on the pool's atexit join.
+
+    Asserted by the order of calls, not by a stopwatch: a timing test is a flake
+    that happens to pass on a fast machine."""
+    import threading
+
+    from app import pipeline as pl
+
+    calls: list[str] = []
+    released = threading.Event()
+
+    class FakePipe:
+        def read(self, nbytes: int) -> bytes:
+            released.wait(30)         # настоящий read ждёт, пока процесс не умрёт
+            return b""
+
+        def close(self) -> None:
+            calls.append("close")
+
+    class FakeProc:
+        stdout = FakePipe()
+
+        def poll(self):
+            return None
+
+        def kill(self) -> None:
+            calls.append("kill")
+            released.set()
+
+        def wait(self, timeout=None) -> int:
+            calls.append("wait")
+            return 0
+
+    monkeypatch.setattr(pl.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(pl, "LISTEN_READ_TIMEOUT_SEC", 0.2)
+    with pytest.raises(TimeoutError):
+        pl._tape_pass(Path("silent-never-answers.mp3"), 5.0)
+    assert calls and calls[0] == "kill", f"cleanup did not start by killing: {calls}"
+    assert "close" in calls[1:], f"the pipe was closed before the kill: {calls}"
+
+
+def test_a_refused_block_leaves_the_pass_exactly_as_it_was():
+    """A pass that says "I will not hold that" must not have already counted it:
+    `peak_samples` is the memory number the job's ceiling is priced against, and a
+    refusal that grows it makes the artifact lie about the promise it just kept."""
+    env = A.Envelope(RATE, 1.0)
+    with pytest.raises(A.AlignError) as exc:
+        env.feed(array("h", [0] * (3 * RATE)).tobytes())
+    assert exc.value.code == "bad_block"
+    assert (env.samples, env.peak_samples, env.blocks) == (0, 0, 0)
+    assert not env._levels, "a refused block was measured anyway"
+
+
+def test_a_pause_exactly_min_gap_long_holds_no_cut_for_either_search():
+    """`MIN_GAP_SEC == 2 * BOUNDARY_PAD`: such a pause is legal as a pause and empty
+    as a place to put a cut. The sweep asks `_target` and says "not in silence";
+    an index that answers from the raw bounds says the opposite, and the customer
+    report then counts a cut as already-correct because of an optimisation."""
+    gaps = [A.Gap(1.0, 1.0 + A.MIN_GAP_SEC), A.Gap(3.0, 4.0)]
+    idx = A._GapIndex.build(gaps)
+    assert idx is not None
+    mid = 1.0 + A.MIN_GAP_SEC / 2
+    assert idx.at(mid) == -1, "the index put a cut inside a pause with no room"
+    assert A.snap_one(mid, gaps, 0.6, 0.0, 5.0, idx) == \
+           A.snap_one(mid, gaps, 0.6, 0.0, 5.0)
+
+
+def test_a_tape_shorter_than_a_frame_is_too_short_and_not_missing_audio(client, auth):
+    """Four hundred real samples are an audio track the engine cannot measure — they
+    are not "no audio track". The client reads these reasons in three languages, so
+    the difference is a user hunting for a file they already uploaded."""
+    from app import db, pipeline as pl
+    from audio_studio import listening
+    uid = db.create_user("TS", "+99890ts00001")["id"]
+    job = db.create_job(uid, "subtitles", "uz", "ru", 1.0, "x.srt", {})
+    tiny = long_tape(60)[:400]                  # 0,05 с: лента есть, кадр не выходит
+    tape = listening(tiny, block_cues(6), 10.0)
+    assert tape is not None, "a short tape was reported as no tape at all"
+    assert "curve" not in tape and tape["refusal"] == "too_short", tape
+    pl._align_step(job["id"], tape, block_cues(6))
+    line = [e for e in db.job_timeline(job["id"]) if e["step"] == "align"][-1]
+    assert line["data"] == {"code": "skipped", "reason": "too_short"}, line["data"]
+    assert "too_short" in line["message"], line["message"]
 

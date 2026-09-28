@@ -480,6 +480,28 @@ def test_a_voice_profile_is_the_same_whatever_the_block_size(chunk):
     assert voices == _reference_profiles(pcm, segs), f"block {chunk} changed the voices"
 
 
+def test_a_cue_entirely_past_the_listened_tape_is_counted_too():
+    """The other half of the same lie.
+
+    A window that opened and never closed is caught by `finish()` walking the open
+    list. A window the stream never even reached is not in that list, and before this
+    test it was not counted either: the card then read "0 cues off-tape" next to
+    ninety cues that got no voice at all — the exact silence Round 25 exists to
+    remove, wearing a number instead of hiding behind one."""
+    from array import array
+
+    from app import pipeline as pl
+    from app.providers.base import Segment
+
+    rate = pl.DIAR_PCM_RATE
+    pcm = array("h", [20000 if i % 2 else -20000 for i in range(rate * 20)])
+    segs = [Segment(1.0, 3.0, "ichida"), Segment(400.0, 405.0, "daleko"),
+            Segment(410.0, 412.0, "eshyam")]
+    voices, lost = _collect(pcm, segs, 60_000)
+    assert lost == 2, f"two cues are nowhere on this tape, counted: {lost}"
+    assert voices[0] is not None and voices[1] is None and voices[2] is None, voices
+
+
 def test_a_cue_that_is_not_on_the_tape_gets_no_voice_and_is_counted():
     """The old `_voices` clamped a cue to `min(len(pcm), …)` and measured what was
     left: a profile of a fragment, reported as a voice.

@@ -93,28 +93,43 @@ def block_cues(seconds: float, per_block: float = BLOCK_SEC) -> list:
             for i in range(n)]
 
 
-def listening(pcm, segs: list, billed_minutes: float, rate: int = RATE):
+def listening(pcm, segs: list, billed_minutes: float, rate: int = RATE) -> dict | None:
     """The listening pass this buffer would produce, run by the production loop.
 
-    Only the ffmpeg pipe is replaced — the envelope, the block size, the ceiling,
-    the profile windows and the truncation sentence all come out of `pipeline`, so
-    a test that reads these numbers reads the same decision a job makes. Feeding a
-    finished buffer is not the same thing as feeding a socket, and it is exactly the
-    difference the invariance tests below care about.
+    Two passes, exactly like a job: the curve first (its own), then the voice
+    profiles over the timeline the caller hands in. Only the ffmpeg pipe is
+    replaced — the ceiling, the blocks, the deadline, the span book and the
+    truncation sentence all come out of `pipeline`, so a test that reads these
+    numbers reads the same decision a job makes.
+
+    A finished buffer is not a socket, and that is the point: `_drain` is asked
+    for `min(block, remaining)` bytes, so the helper's reader has to behave like a
+    pipe that answers exactly what it was asked for.
     """
     from app import pipeline as pl
 
     assert rate == pl.DIAR_PCM_RATE, "_drain reads the pipeline's own rate"
     raw = pcm.tobytes() if isinstance(pcm, array) else bytes(pcm)
-    pos = 0
 
-    def read_block(nbytes: int) -> bytes:
-        nonlocal pos
-        out = raw[pos:pos + nbytes]
-        pos += len(out)
-        return out
+    def reader():
+        pos = 0
 
-    return pl._drain(read_block, segs, billed_minutes)
+        def read_block(nbytes: int) -> bytes:
+            nonlocal pos
+            out = raw[pos:pos + nbytes]
+            pos += len(out)
+            return out
+        return read_block
+
+    tape = pl._drain(reader(), billed_minutes)
+    if tape is None:
+        return None
+    book = pl._SpanBook(pl._profile_spans(segs), len(segs))
+    prof = pl._drain(reader(), billed_minutes, book=book, need_curve=False)
+    if prof is not None:
+        tape["voices"] = prof["voices"]
+        tape["off_tape"] = prof["off_tape"]
+    return tape
 
 
 def wav_bytes(pcm, rate: int = RATE, channels: int = 1, width: int = 2,

@@ -217,17 +217,27 @@ class _SpanBook:
 
         Реплика теряет профиль целиком, если хоть одно её окно не влезло в ленту:
         усреднять половину окна с отсутствующей половиной значит показать слушателя,
-        которого не было. Окно, которое потоком даже не открылось, — тот же факт, и
-        считается он так же: не «тихий None в списке», а «off_tape»."""
+        которого не было. Три способа не получить профиля — и все три обязаны быть
+        посчитаны, потому что «off_tape: 0» рядом с половиной карточек без голоса —
+        это ровно тот тихий дефект, против которого написан весь этот раунд:
+          * окно открылось и не закрылось (поток кончился внутри);
+          * окно не открылось вовсе (реплика целиком за прослушанным куском);
+          * окна закрылись, но ни одно не дало профиля (окно короче 32 отсчётов)."""
         for _a, _b, cue, _part, _buf in self.open:
             self.lost.add(cue)          # поток кончился раньше, чем закрылось окно
         self.open = []
+        for _a, _b, cue, _part in self.spans[self.cursor:]:
+            self.lost.add(cue)          # окно даже не открылось: реплики нет в ленте
         voices: list = [None] * self.count
         for cue, got in self.parts.items():
             if cue in self.lost or len(got) != self.expected[cue]:
-                self.lost.add(cue)      # окно не открылось вовсе: реплики нет на ленте
+                self.lost.add(cue)      # окно не открылось вовсе
                 continue
-            voices[cue] = _avg_profile([got[k] for k in sorted(got)])
+            live = _avg_profile([got[k] for k in sorted(got)])
+            if live is None:
+                self.lost.add(cue)      # замеры пустые: голоса на этом окне нет
+                continue
+            voices[cue] = live
         return voices, len(self.lost)
 
 
@@ -240,6 +250,13 @@ def _heard_budget(billed_minutes: float) -> tuple[float, float]:
     слушается ровно, без декадации, а второго часа в оплаченном таймлайне просто
     нет. О событии говорит оплаченное время без запаса: запас — наш внутренний
     буфер, а не обещание клиенту.
+
+    Честно о самом потолке: сегодня он выше потолка загрузки (30 минут таймлайна
+    и 4 МБ тела), поэтому ни одна оплаченная задача не обрезается вовсе —
+    `MAX_JOB_TAPE_SEC` это запас под следующий лимит хранилища, а не обещание часа.
+    Ветка «heard … of …» остаётся нужной для контейнера, который наврал о своей
+    длительности: там оплаченное время кончается раньше ленты, и смолчать — значит
+    вернуть клиенту частичную работу как полную.
     """
     paid = max(billed_minutes, 0.1) * 60.0
     return min(paid + TIMELINE_SLACK_SEC, MAX_JOB_TAPE_SEC), paid
@@ -261,70 +278,95 @@ def _heard_report(heard: float, want: float, paid: float) -> tuple[dict, str]:
     return {}, ""
 
 
-def _drain(read_block, segments: list[Segment], billed_minutes: float,
-           deadline: float = 0.0) -> dict | None:
+def _drain(read_block, billed_minutes: float, deadline: float = 0.0,
+           book: "_SpanBook | None" = None, need_curve: bool = True) -> dict | None:
     """Один проход по ленте: `read_block(nbytes)` отдаёт следующий кусок PCM.
 
     Петля живёт здесь, а не внутри ffmpeg-обвязки, по той же причине, по какой
     огибающая живёт в движке: тесты должны судить НАСТОЯЩИЙ порядок reads —
-    потолок, блоки, дедлайн, профили — а не его копию, нарисованную в fixture.
+    потолок, блоки, дедлайн — а не его копию, нарисованную в fixture.
     `_tape_pass` приносит только пайп, `_drain` — все решения.
 
-    Возвращает None, когда ленты фактически нет: слушать нечего, движки откажут
-    сами, а job должен дожить до субтитров. Дедлайн срабатывает между блоками и
-    будит `TimeoutError`, а не тихий возврат: повисший ffmpeg не имеет права
-    выглядеть как отсутствующий."""
+    Три границы, и все три обязаны сойтись руками, а не удачей:
+      * читается ровно `min(оплачено + запас, потолок)`, запрос урезан по остатку
+        budget'а: без этого последний read слушает на целый блок больше
+        обещанного, и `heard_sec` расходится с `reach_sec` на 59 с (проверено на
+        потолке, который не кратен блоку);
+      * блок кончается на границе отсчёта: огибающая уносит неполный кадр сама, а
+        абсолютные смещения окон профиля считаются в отсчётах, и кривой байт
+        сдвинул бы каждое окно на полотсчёта — тот самый дефект, из-за которого
+        два голоса сливаются в один;
+      * `None` — только когда труба не дала ничего. Лента в триста отсчётов — не
+        «отсутствующая аудиодорожка»: это `too_short`, и отказывать обязан
+        движок, а не транспорт, иначе клиент читает про несуществующий WAV.
+    """
     want, paid = _heard_budget(billed_minutes)
     block = max(1, int(LISTEN_BLOCK_SEC * DIAR_PCM_RATE))
     stop_at = int(want * DIAR_PCM_RATE)
-    env = align_mod.Envelope(DIAR_PCM_RATE, LISTEN_BLOCK_SEC)
-    book = _SpanBook(_profile_spans(segments), len(segments))
+    env = align_mod.Envelope(DIAR_PCM_RATE, LISTEN_BLOCK_SEC) if need_curve else None
     read = 0
     tail = b""
     while read < stop_at:
         if deadline and time.monotonic() > deadline:
             raise TimeoutError(f"job exceeded {JOB_TIMEOUT_SEC}s")
-        chunk = read_block(block * 2)
+        chunk = read_block(min(block, stop_at - read) * 2)
         if not chunk:
             break            # лента кончилась; недочитанный полубайт — не отсчёт
-        # Блок должен кончаться на границе отсчёта: огибающая уносит неполный кадр
-        # сама, а вот абсолютные смещения окна профиля считаются в отсчётах, и
-        # кривой байт сдвинул бы каждое окно на полотсчёта — тихий дефект, ровно
-        # тот, из-за которого два голоса сливаются в один.
         data, tail = tail + chunk, b""
         if len(data) % 2:
             data, tail = data[:-1], data[-1:]
         if not data:
             continue
-        env.feed(data)
-        book.consume(read, data)
+        if env is not None:
+            env.feed(data)
+        if book is not None:
+            book.consume(read, data)
         read += len(data) // 2
-    if env.samples < align_mod.MIN_SAMPLES:
+    if read == 0:
         return None
-    curve = env.curve()
-    voices, lost = book.finish()
-    heard = env.samples / DIAR_PCM_RATE
+    heard = read / DIAR_PCM_RATE
     trunc, note = _heard_report(heard, want, paid)
-    return {"curve": curve, "voices": voices, "beyond_tape": lost,
-            "heard_sec": round(heard, 3), "paid_sec": round(paid, 3),
-            "reach_sec": round(want, 3), "blocks": env.blocks,
-            "block_sec": env.block_sec, "peak_samples": env.peak_samples,
-            "truncation": trunc, "note": note}
+    out = {"heard_sec": round(heard, 3), "paid_sec": round(paid, 3),
+           "reach_sec": round(want, 3), "truncation": trunc, "note": note}
+    if env is not None:
+        # Коротче одного измеримого кадра огибающей не бывает: шагам нужен не
+        # валящийся движок, а код отказа — их читает карточка задачи.
+        if read < align_mod.MIN_SAMPLES:
+            out["refusal"] = "too_short"
+        else:
+            out["curve"] = env.curve()
+        out["blocks"] = env.blocks
+        out["block_sec"] = env.block_sec
+        out["peak_samples"] = env.peak_samples
+    if book is not None:
+        voices, lost = book.finish()
+        out["voices"] = voices
+        out["off_tape"] = lost
+    return out
 
 
-def _tape_pass(source: Path, segments: list[Segment], billed_minutes: float,
-               deadline: float = 0.0) -> dict | None:
-    """Один проход ffmpeg по ленте: огибающая всей записи и окна профилей голоса.
+def _tape_pass(source: Path, billed_minutes: float, deadline: float = 0.0,
+               book: "_SpanBook | None" = None,
+               need_curve: bool = True) -> dict | None:
+    """Проход ffmpeg по ленте: `need_curve` — огибающая всей записи, `book` — окна
+    профилей голоса, и то и другое блоками, никогда не удерживая запись целиком.
 
-    Лента читается блоками и никогда не держится целиком: огибающая отдаёт движкам
-    пятьдесят чисел в секунду вместо шестнадцати тысяч отсчётов, а профили
-    закрываются по мере прохода. Раньше job, купленный на 20 минут, слышал первые
-    15 и молчал; теперь слышит всё, что оплачено, до потолка в час.
+    Профили собираются ОТДЕЛЬНЫМ проходом (`_profiles_pass`), а не в этом: окна
+    профиля задаёт таймлайн, а Jimlik этот таймлайн передвигает. Снимать отпечаток
+    голоса по окну, которое выравниватель уже отменил, — значит спорить о двух
+    голосах там, где лента показывала один. Второй проход стоит перекодировки
+    того же материала: 16-минутная лента — ~1 с (job целиком: 2 с).
 
     Здесь только пайп: `None`, если ffmpeg не запускается (не-аудио, битый файл) —
-    оба движка и диаризация тогда честно отказываются, а job живёт. Таймаут чтения
-    поднимает `TimeoutError`, а не виснет: мёртвый пайп будить проверкой дедлайна
-    между блоками бессмысленно, она сама в нём и застрянет."""
+    оба движка и диаризация тогда честно отказываются, а job живёт.
+
+    Порядок уборки — убить, потом присоединить, потом закрыть. `close()` на пайпе,
+    из которого рабочий поток всё ещё читает, ждёт лок `BufferedReader` и упирается
+    в конец ffmpeg: тогда обещанный таймаут чтения не возвращает управление вообще
+    (замерено: 98,8 с против 0,5 с), job висит в `running` без возврата кредита, а
+    `atexit`-join пула вешает останов сервера. Таймаут потому и поднимает
+    `TimeoutError`, а не тихий `None`: повисший ffmpeg не имеет права выглядеть
+    отсутствующим."""
     want, _paid = _heard_budget(billed_minutes)
     cmd = [settings.ffmpeg_bin, "-v", "error", "-i", str(source),
            "-t", f"{want:.3f}", "-ac", "1", "-ar", str(DIAR_PCM_RATE),
@@ -346,20 +388,32 @@ def _tape_pass(source: Path, segments: list[Segment], billed_minutes: float,
 
     try:
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ovoz-tape")
-        return _drain(read_block, segments, billed_minutes, deadline)
+        return _drain(read_block, billed_minutes, deadline, book=book,
+                      need_curve=need_curve)
     finally:
+        if proc.poll() is None:
+            proc.kill()                  # снимает блокировку read() раньше всего
         if pool is not None:
-            pool.shutdown(wait=False)
+            try:
+                pool.shutdown(wait=True, cancel_futures=True)
+            except TypeError:            # старые Python: нет cancel_futures
+                pool.shutdown(wait=True)
         try:
             proc.stdout.close()
         except OSError:
             pass
-        if proc.poll() is None:
-            proc.kill()
         try:
             proc.wait(timeout=10)
         except (subprocess.TimeoutExpired, OSError):
             pass
+
+
+def _profiles_pass(source: Path, segments: list[Segment], billed_minutes: float,
+                   deadline: float = 0.0) -> dict | None:
+    """Второй, ограниченный проход — профили голоса по ФИНАЛЬНОМУ таймлайну."""
+    return _tape_pass(source, billed_minutes, deadline,
+                      book=_SpanBook(_profile_spans(segments), len(segments)),
+                      need_curve=False)
 
 
 def _align_step(jid: str, tape: dict | None, segments: list[Segment]) -> list[Segment]:
@@ -374,6 +428,15 @@ def _align_step(jid: str, tape: dict | None, segments: list[Segment]) -> list[Se
     if tape is None:
         db.add_job_event(jid, "align", "skipped: no audio track (text-only source)",
                          {"code": "skipped", "reason": "no_audio"})
+        return segments
+    if "curve" not in tape:
+        # Труба дала материал короче одного измеримого кадра. Это не «аудио нет»:
+        # файл клиент прислал настоящий, и назвать отсутствие огибающей
+        # отсутствием дорожки — значит отправить клиента искать WAV, которого он
+        # уже загрузил.
+        why = tape.get("refusal") or "no_audio"
+        db.add_job_event(jid, "align", f"skipped: {why}",
+                         {"code": "skipped", "reason": why})
         return segments
     note, trunc = tape["note"], tape["truncation"]
     cues = [srt_mod.Cue(i + 1, s.start, s.end, s.text)
@@ -418,6 +481,11 @@ def _words_step(jid: str, tape: dict | None, cues: list) -> None:
         db.add_job_event(jid, "words",
                          "skipped: no audio track (text-only source)",
                          {"code": "skipped", "reason": "no_audio"})
+        return
+    if "curve" not in tape:
+        why = tape.get("refusal") or "no_audio"
+        db.add_job_event(jid, "words", f"skipped: {why}",
+                         {"code": "skipped", "reason": why})
         return
     note, trunc = tape["note"], tape["truncation"]
     try:
@@ -541,10 +609,11 @@ def _execute(job: dict, deadline: float = 0) -> None:
     # не по тем меткам, которые выдал ASR. Дешевле сделать это до диаризации и
     # перевода: оба они работают по таймингам сегментов и получают исправленную карту.
     meta = job.get("meta") or {}
+    billed = float(job.get("minutes") or 0)
     tape = None
     if meta.get("align") or meta.get("diarize") or meta.get("words"):
         _check_deadline()
-        tape = _tape_pass(source, segments, float(job.get("minutes") or 0), deadline)
+        tape = _tape_pass(source, billed, deadline)
     if meta.get("align"):
         _check_deadline()
         segments = _align_step(jid, tape, segments)
@@ -554,7 +623,10 @@ def _execute(job: dict, deadline: float = 0) -> None:
     turns = None
     if meta.get("diarize"):
         _check_deadline()
-        voices = tape["voices"] if tape else None
+        # Профили — по финальному таймлайну: после Jimlik, а не до него.
+        prof = (_profiles_pass(source, segments, billed, deadline)
+                if tape is not None else None)
+        voices = prof["voices"] if prof else None
         turns = diar_mod.analyze_turns(segments, voices=voices)
         read = diar_mod.summary(turns)
         # Профиль голоса — замер, а не текст: реплика, чьё окно не влезло в ленту,
@@ -563,22 +635,22 @@ def _execute(job: dict, deadline: float = 0) -> None:
         # тексту —
         # это другой факт и другой код: тот же счётчик без оговорки врал бы о том,
         # что движок слышал два голоса там, где он видел только два абзаца.
-        if tape is None:
+        if prof is None:
             db.add_job_event(jid, "diarize",
                              f"{read['speakers']} speakers / {read['turns']} turns "
                              f"(text only: no audio track)",
                              {"code": "turns_text", "speakers": read["speakers"],
                               "turns": read["turns"]})
         else:
-            lost = tape["beyond_tape"]
+            lost = prof["off_tape"]
             db.add_job_event(
                 jid, "diarize",
                 f"{read['speakers']} speakers / {read['turns']} turns"
-                + (f", {lost} cues off-tape" if lost else "") + tape["note"],
+                + (f", {lost} cues off-tape" if lost else "") + prof["note"],
                 {"code": "turns", "speakers": read["speakers"],
                  "turns": read["turns"], "off_tape": lost,
-                 "heard_sec": tape["heard_sec"],
-                 "truncation": tape["truncation"] or None})
+                 "heard_sec": prof["heard_sec"],
+                 "truncation": prof["truncation"] or None})
         art0 = _art_dir(jid)
         (art0 / "diarization.json").write_text(
             json.dumps({**read,

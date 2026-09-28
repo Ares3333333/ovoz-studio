@@ -23,15 +23,20 @@ if ("serviceWorker" in navigator) {
 
   window.addEventListener("load", function () {
     navigator.serviceWorker.register("/sw.js", { scope: "/" })
-      .then(function (reg) { if (reg.waiting) reg.waiting.postMessage("skipWaiting"); })
+      .then(function (reg) {
+        if (reg.waiting) reg.waiting.postMessage("skipWaiting");
+        // A worker checks for a new version on navigation, and a tab that is never
+        // navigated — opened from a launcher, left in the background — keeps running
+        // yesterday's shell indefinitely. Browser QA saw exactly that: the server
+        // had moved to a new build, the tab still executed the old one, and only a
+        // manual reload fixed it. So ask, once, on load.
+        return reg.update ? reg.update().catch(function () {}) : null;
+      })
       .catch(function () {});
   });
 
-  navigator.serviceWorker.addEventListener("message", function (e) {
-    var data = e.data;
-    if (typeof data !== "string" || data.indexOf("build:") !== 0) return;
-    var live = data.slice(6);
-    if (!SERVED_BUILD || live === SERVED_BUILD) return;
+  function adoptBuild(live) {
+    if (!live || !SERVED_BUILD || live === SERVED_BUILD) return;
     var GUARD = "ovoz-sw-reload";
     try {
       if (sessionStorage.getItem(GUARD) === live) return;
@@ -40,5 +45,21 @@ if ("serviceWorker" in navigator) {
       return;                      // no storage, no reload: never loop
     }
     window.location.reload();
+  }
+
+  navigator.serviceWorker.addEventListener("message", function (e) {
+    var data = e.data;
+    if (typeof data !== "string" || data.indexOf("build:") !== 0) return;
+    adoptBuild(data.slice(6));
   });
+
+  // The announce-on-activate path only fires for a page that is already open when
+  // a worker takes over. A page that boots on top of an already-active worker of a
+  // different build hears nothing at all — so it asks. `controller` is the worker
+  // actually in charge of this document, which is exactly the thing worth knowing.
+  navigator.serviceWorker.ready
+    .then(function (reg) {
+      if (reg.active) reg.active.postMessage("whatBuild");
+    })
+    .catch(function () {});
 }

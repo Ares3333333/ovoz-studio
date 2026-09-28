@@ -280,7 +280,15 @@ def words_blocks(blocks, rate: int, cues: list[Cue],
 
 
 def words_curve(cues: list[Cue], curve: dict) -> dict:
-    """Time every word against a curve the caller has already measured."""
+    """Time every word against a curve the caller has already measured.
+
+    Deliberately uncapped by `MAX_WORDS`: that ceiling exists so an anonymous
+    caller cannot buy CPU, and a job has already paid, been throttled and been
+    size-checked. Re-asserting it here would refuse a Studio job for a number that
+    costs nothing extra — the same quiet bug the listen window used to be. A job's
+    real bound is `MAX_SEGMENTS_PER_JOB` times the words per cue, and every cut
+    searches a fixed window of frames, so the work is linear in the tape's own
+    text."""
     runs = speech_runs(curve)
     if curve["silent_tape"] or not runs:
         # Nothing to hear: timing words off geometry alone would sell the customer
@@ -373,9 +381,12 @@ def words_curve(cues: list[Cue], curve: dict) -> dict:
         "engine": "ovoz-soz",
         "audio": {"duration": round(duration, 3), "frames": len(levels),
                   "frame_ms": round(frame_s * 1000.0, 3),
-                  "window_sec": MAX_LISTEN_SEC,
                   # The same honesty Jimlik reports: how much of the tape this
-                  # answer actually heard, and in how many pieces.
+                  # answer actually heard, in how many pieces, and what one piece
+                  # was allowed to be. For a streamed pass the block IS the window;
+                  # quoting the single-call ceiling beside `heard_sec` of an hour
+                  # would make the artifact deny its own measurement.
+                  "window_sec": curve.get("block_sec", MAX_LISTEN_SEC),
                   "heard_sec": round(duration, 3),
                   "blocks": curve.get("blocks", 1),
                   "block_sec": round(curve.get("block_sec", MAX_LISTEN_SEC), 3),

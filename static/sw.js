@@ -7,7 +7,7 @@
  *   – API calls: network-first, cache fallback only for GET /api/plans, /api/v1/info
  *   – Everything else: network-only (no cache poisoning)
  * ──────────────────────────────────────────────────────────────────── */
-const BUILD = '0.22.0';
+const BUILD = '0.22.1';
 const VERSION = 'ovoz-v' + BUILD;
 const SHELL_CACHE = VERSION + '-shell';
 const API_CACHE = VERSION + '-api';
@@ -60,6 +60,16 @@ self.addEventListener('activate', (event) => {
         }
       })
   );
+});
+
+// ─── Messages ───
+// A page that boots on top of an already-active worker never sees an 'activate'
+// event, so it asks which build is in charge instead of waiting for a navigation to
+// notice. Answering is the whole protocol: the page compares and decides.
+self.addEventListener('message', (event) => {
+  if (event.data === 'whatBuild') {
+    try { event.source.postMessage('build:' + BUILD); } catch (e) { /* gone */ }
+  }
 });
 
 // ─── Fetch: routing strategy ───

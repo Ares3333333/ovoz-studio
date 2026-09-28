@@ -1588,7 +1588,7 @@ function renderJobs(jobs) {
     const jid = esc(j.id);
     const arts = Object.entries(j.artifacts || {});
     const links = arts.map(([kind, url]) =>
-      `<button class="art" data-dl="${esc(url)}" data-name="${esc(kind + '-' + j.id)}">${esc(kindLabel(kind))}</button>`
+      `<button class="art" data-dl="${esc(url)}" data-kind="${esc(kind)}" data-name="${esc(kind + '-' + j.id)}">${esc(kindLabel(kind))}</button>`
     ).join("");
     const preview = j.artifacts?.srt
       ? `<button class="art" data-preview="${esc(j.id)}">${esc(t("preview"))} \u25B8</button>` : "";
@@ -1678,7 +1678,7 @@ function renderJobs(jobs) {
   list.querySelectorAll("[data-dl]").forEach(b =>
     b.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      await downloadArtifact(b.dataset.dl, b.dataset.name);
+      await downloadArtifact(b.dataset.dl, b.dataset.kind, b.dataset.name);
     }));
   list.querySelectorAll("[data-share]").forEach(b =>
     b.addEventListener("click", async () => {
@@ -1692,7 +1692,22 @@ function renderJobs(jobs) {
     }));
 }
 // скачивание через Authorization-заголовок: токен не светится в URL/логах
-async function downloadArtifact(url, name) {
+const DL_EXT = { align: ".json", words: ".json", diarization: ".json",
+                 layout: ".json", dubbing: ".wav", ass: ".ass",
+                 ass_karaoke: ".ass", srt: ".srt", srt_bilingual: ".srt",
+                 document: ".txt", transcript: ".txt" };
+
+function dlName(kind, name, disposition) {
+  // The extension comes from the server's own `Content-Disposition` where it can,
+  // and from the artifact kind where it cannot: guessing it from a substring in the
+  // URL saved the engine report as `align-<id>.txt`, which a person cannot tell from
+  // a text file. The basename stays the id-stamped one the chip shows, because a
+  // person who downloads three jobs must be able to tell the files apart.
+  const disp = (disposition || "").match(/filename="[^"]*(\.[A-Za-z0-9]+)"/);
+  return name + (disp ? disp[1] : (DL_EXT[kind] || ".txt"));
+}
+
+async function downloadArtifact(url, kind, name) {
   if (!token) return requireAuth();
   try {
     const resp = await fetch(url, { headers: { Authorization: "Bearer " + token } });
@@ -1700,7 +1715,7 @@ async function downloadArtifact(url, name) {
     const blob = await resp.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = name + (url.includes("dubbing") ? ".wav" : url.includes("ass") ? ".ass" : url.includes("srt") ? ".srt" : ".txt");
+    a.download = dlName(kind, name, resp.headers.get("Content-Disposition"));
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   } catch (e) { toast(e.message, true); }
@@ -2297,8 +2312,18 @@ if (token) { $("#auth-card").classList.add("hidden"); $("#job-form").classList.r
 // hash routing: открываем studio если #studio в URL (deep-link от Telegram)
 if (location.hash === "#studio") showStudio();
 addEventListener("hashchange", () => {
-  if (location.hash === "#studio" && $("#studio").classList.contains("hidden")) showStudio();
-  else if (!location.hash && !$("#studio").classList.contains("hidden")) showLanding();
+  const h = location.hash;
+  if (h === "#studio" && $("#studio").classList.contains("hidden")) showStudio();
+  else if (!h && !$("#studio").classList.contains("hidden")) showLanding();
+  else if (h && h !== "#studio" && !$("#studio").classList.contains("hidden")) {
+    // A deep link to a landing section (#ling, #engine, #prices) typed or shared
+    // while the studio was open used to land nowhere: every target section lives on
+    // the landing page, which was display:none at that moment, so the browser had
+    // nothing to scroll to and the visitor saw a blank studio with a changed URL.
+    showLanding();
+    const el = $(h);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 });
 // Telegram autologin runs last on purpose. `telegram-web-app.js` can already
 // define window.Telegram by the time app.js is evaluated, so tgTryLogin() used to
