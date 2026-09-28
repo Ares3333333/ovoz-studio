@@ -923,7 +923,7 @@ jobs во внешний брокер (Redis/RQ) и переезда на Postgr
 ## Тесты и проверка
 
 ```bash
-python -m pytest -q                # 679 tests: SRT, transliteration, billing, e2e, security,
+python -m pytest -q                # 702 tests: SRT, transliteration, billing, e2e, security,
                                    # pagination, error codes, magic-bytes, metrics, WS (в т.ч.
                                    # доставка событий в живой socket), sharing, admin, settings,
                                    # notifications, plan upgrade, schema versioning, API keys,
@@ -940,7 +940,15 @@ python -m pytest -q                # 679 tests: SRT, transliteration, billing, e
                                    # просадок, экспорта, гейты статических инвариантов витрины),
                                    # и окно прослушивания: 15-минутная лента услышана целиком,
                                    # отказ до декодирования, один закон на двух слушателей,
-                                   # гейт на отсутствие прореживания в frame_levels
+                                   # гейт на отсутствие прореживания в frame_levels;
+                                   # с v0.22 — блок-проход: кривая, порог и длительность не
+                                   # зависят от размера блока (1000…480000 отсчётов и обрывающий
+                                   # байт), индекс пауз отвечает побайтно как перебор, карточка на
+                                   # 19-й минуте попадает в настоящую паузу, а профиль голоса
+                                   # втаскивается из потока той же математикой, что и из буфера
+python scripts/probe_reach_live.py http://127.0.0.1:8102  # живая проба дальности слушания:
+                                   # реальная 16-минутная лента через /api/jobs, отчёт задачи
+                                   # обязан сказать 960 с услышано, blocks=16, без обрезки
 python scripts/smoke.py            # базовый прогон живого сценария
 python scripts/verify_2026.py http://127.0.0.1:8102   # 105 HTTP-проверк контракта на живом сервере
                                    # (в т.ч. какие `Cache-Control` получают документ и код
