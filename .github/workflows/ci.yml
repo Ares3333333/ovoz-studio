@@ -17,10 +17,34 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Show the environment the suite is judged on
+        run: python -c "import shutil,sys,platform;print(sys.version.strip());print(platform.platform());print('ffmpeg:', shutil.which('ffmpeg'))"
       - name: Run tests
-        run: python -m pytest -q --tb=short
+        run: |
+          set +e
+          python -m pytest -q --tb=short | tee pytest.log
+          code=$?
+          set -e
+          if [ $code -ne 0 ]; then
+            # Красный CI, который не называет себя, бесполезен для того, кто его
+            # не запускал руками: подписанный URL журнала живёт вне API, а
+            # `::error::` становится аннотацией, которую видно по запросу.
+            grep -E '^(FAILED|ERROR)' pytest.log | head -25 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit $code
+          fi
         env:
           OVOZ_SYNC_PIPELINE: "1"
+      # Без этого красная задача остаётся нечитаемой для того, кто её не вводил
+      # руками: лог живёт на подписанном URL, а аннотации и артефакт — в API.
+      - name: Upload the pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+          if-no-files-found: ignore
 
   docker:
     runs-on: ubuntu-latest
@@ -47,4 +71,4 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install -r requirements-dev.txt
-      - run: ruff check app/ --select E,F,W --ignore E501
+      - run: ruff check app/ --select E,F,W --ignore E501 --output-format=github
