@@ -302,18 +302,19 @@ def test_speech_to_text_type_carries_the_same_flag(client, auth):
 # ─── faster-whisper: the real, offline, no-key Python provider (Round 30) ──────
 
 class _FakeSpec:
-    """Stands in for importlib.util.find_spec so the faster branch is testable
+    """Stands in for the _package_present seam so the faster branch is testable
     whether or not faster-whisper is installed in the running environment (CI has
-    no heavy CTranslate2 wheel; this machine does)."""
+    no heavy CTranslate2 wheel; this machine does). Patching the app seam, not the
+    stdlib importlib, so no other import is affected during the test."""
 
     def __init__(self, present): self._p = present
-    def __call__(self, name): return object() if (self._p and name == "faster_whisper") else None
+    def __call__(self, name): return bool(self._p and name == "faster_whisper")
 
 
 def test_faster_without_the_package_is_honest_not_silent(cfg, monkeypatch):
     """`OVOZ_ASR_PROVIDER=faster` with the library missing must not hand a customer a
     demo transcript and call it real — the whole point of the Round-24 status split."""
-    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(False))
+    monkeypatch.setattr(A, "_package_present", _FakeSpec(False))
     cfg.asr_provider = "faster"
     cfg.asr_model = "base"
     st = A.status()
@@ -321,7 +322,7 @@ def test_faster_without_the_package_is_honest_not_silent(cfg, monkeypatch):
 
 
 def test_faster_needs_a_model_size(cfg, monkeypatch):
-    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    monkeypatch.setattr(A, "_package_present", _FakeSpec(True))
     cfg.asr_provider = "faster"
     cfg.asr_model = ""
     st = A.status()
@@ -329,7 +330,7 @@ def test_faster_needs_a_model_size(cfg, monkeypatch):
 
 
 def test_faster_configured_and_present_reports_real(cfg, monkeypatch):
-    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    monkeypatch.setattr(A, "_package_present", _FakeSpec(True))
     cfg.asr_provider = "faster"
     cfg.asr_model = "base"
     cfg.asr_compute = "int8"
@@ -341,7 +342,7 @@ def test_faster_configured_and_present_reports_real(cfg, monkeypatch):
 def test_get_asr_reuses_one_loaded_model_per_size(cfg, monkeypatch):
     """The weights are big; a fresh WhisperModel per job would pay ~10 s of load on
     every request. get_asr must hand back the same instance for the same (size,cpu)."""
-    monkeypatch.setattr(A.importlib.util, "find_spec", _FakeSpec(True))
+    monkeypatch.setattr(A, "_package_present", _FakeSpec(True))
     cfg.asr_provider = "faster"
     cfg.asr_model = "small"
     cfg.asr_compute = "int8"
@@ -376,3 +377,32 @@ def test_public_info_never_leaks_the_faster_model_or_package(client, monkeypatch
     st = client.get("/api/v1/info").json()["providers"]["asr"]
     assert "operator" not in st
     assert "faster_model" not in st and "faster_package" not in st
+
+
+def test_faster_provider_still_reads_text_uploads(tmp_path):
+    """Round-30 MAJOR: the recommended no-key ASR must not crash a .srt/.txt job. A
+    text upload is the customer's own transcript, not speech to decode -- so it goes
+    through the same parse SimASR uses, WITHOUT ever loading the (heavy) model."""
+    srt = tmp_path / "cap.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nSalom dunyo\n\n", encoding="utf-8")
+    prov = A.FasterWhisperASR("base")          # _model stays None: no weights loaded
+    segs = prov.transcribe(srt, "uz")
+    assert [s.text for s in segs] == ["Salom dunyo"], segs
+    assert prov._model is None, "a text upload must not load the whisper model"
+
+
+def test_faster_load_failure_does_not_leak_the_cache_path(monkeypatch):
+    """A broken/half-installed wheel raises with the HF cache path + model id; the
+    customer-visible job error must not carry operator topology."""
+    def boom(*a, **k):
+        raise ImportError("cannot open C:\\Users\\x\\.cache\\huggingface\\faster-whisper-base")
+    monkeypatch.setitem(sys.modules, "faster_whisper", _BoomModule(boom))
+    prov = A.FasterWhisperASR("base")
+    with pytest.raises(RuntimeError) as excinfo:
+        prov._load()
+    msg = str(excinfo.value)
+    assert ".cache" not in msg and "huggingface" not in msg and "base" not in msg, msg
+
+
+class _BoomModule:
+    def __init__(self, loader): self.WhisperModel = loader

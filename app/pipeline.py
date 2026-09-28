@@ -789,6 +789,13 @@ def _execute(job: dict, deadline: float = 0) -> None:
         # Без диаризации speakers=None → один основной голос (обратная совместимость).
         speakers = ([turns[i].speaker if i < len(turns) else 0
                      for i in range(len(translated))] if turns else None)
+        # Честность кастинга: голосов на язык два, спикеров диаризация даёт до 8.
+        # Если реальных голосов больше, чем пара, спикеры делят два голоса по циклу —
+        # это надо сказать, а не выдать «два разных голоса» там, где их два на восьмерых.
+        voiced = {sp for sp in (speakers or []) if sp}
+        if len(voiced) > 2:
+            db.add_job_event(jid, "tts",
+                             f"casting: {len(voiced)} speakers share 2 voices (cycled)")
         rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers)
         # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
         # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from ..config import settings
@@ -183,13 +184,35 @@ class FasterWhisperASR:
         self._model = None
 
     def _load(self):
+        # Double-checked under a module lock: up to GLOBAL_WORKER_SLOTS jobs start
+        # concurrently in the worker pool, and an unguarded lazy load let 8 cold jobs
+        # each build a full WhisperModel (hundreds of MB ~ GB each) -> duplicated the
+        # very ~10 s load this cache exists to avoid, or an OOM that kills the process
+        # and every job in it. The lock makes the cold path load exactly once.
         if self._model is None:
-            from faster_whisper import WhisperModel
-            self._model = WhisperModel(self.model_size, device=self.device,
-                                       compute_type=self.compute)
+            with _FASTER_LOCK:
+                if self._model is None:
+                    try:
+                        from faster_whisper import WhisperModel
+                        self._model = WhisperModel(self.model_size, device=self.device,
+                                                   compute_type=self.compute)
+                    except Exception as exc:  # noqa: BLE001
+                        # The raw CTranslate2/HF error embeds the cache path and model
+                        # id (operator topology). Normalize to a variable-name sentence
+                        # so a failed load on a customer's job cannot leak the machine.
+                        raise RuntimeError(
+                            "faster-whisper could not load the configured "
+                            "OVOZ_ASR_MODEL on CPU") from exc
         return self._model
 
     def transcribe(self, audio_path: Path, lang: str) -> list[Segment]:
+        # Text is not speech to decode: a .txt/.srt/.vtt upload (and a .txt sidecar)
+        # is the customer's own transcript and must go through the same path SimASR
+        # uses, or the recommended no-key provider would crash every document/SRT job
+        # the moment ASR is switched to faster-whisper. Only real audio hits the model.
+        p = Path(audio_path)
+        if p.suffix.lower() in TEXT_SUFFIXES or p.with_suffix(".txt").exists():
+            return SimASR()._from_text(p)
         model = self._load()
         segments, _info = model.transcribe(str(audio_path),
                                            language=lang or None, beam_size=5)
@@ -205,14 +228,23 @@ class FasterWhisperASR:
 # One loaded model per (size, compute, device): the weights are big and slow to
 # load, and a worker process runs many jobs, so the instance is cached deliberately.
 _FASTER_SINGLETON: dict[tuple, FasterWhisperASR] = {}
+_FASTER_LOCK = threading.Lock()
+
+
+def _package_present(name: str) -> bool:
+    """A seam so status()/tests can ask 'is the package there' without mutating the
+    stdlib importlib (which would leak into every other import during a test)."""
+    return importlib.util.find_spec(name) is not None
 
 
 def _faster_provider(model_size: str, compute: str, device: str) -> FasterWhisperASR:
     key = (model_size, compute, device)
     prov = _FASTER_SINGLETON.get(key)
     if prov is None:
-        prov = FasterWhisperASR(model_size, compute, device)
-        _FASTER_SINGLETON[key] = prov
+        with _FASTER_LOCK:
+            # setdefault keeps it to one instance even if another thread just made one.
+            prov = _FASTER_SINGLETON.setdefault(
+                key, FasterWhisperASR(model_size, compute, device))
     return prov
 
 
@@ -231,7 +263,7 @@ def status() -> dict:
     model = settings.whisper_model
     dialect = settings.asr_dialect if settings.asr_dialect in DIALECTS else "auto"
     found = bool(binary) and bool(shutil.which(binary))
-    pkg = importlib.util.find_spec("faster_whisper") is not None
+    pkg = _package_present("faster_whisper")
     out = {"provider": provider, "mode": "sim", "code": "", "reason": "",
            "operator": {"binary": binary or None, "binary_found": found,
                         "dialect": dialect, "model": model or None,
