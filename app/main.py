@@ -283,10 +283,35 @@ def _validate_magic(data: bytes, ext: str) -> bool:
     return any(data.startswith(s) for s in sigs)
 
 
+def _job_future_guard(fut, jid: str) -> None:
+    """Страховка брошенного Future: если run_job упал вне своего try (БД-ошибка
+    в get_job/set_status_if — до transition или после refund), исключение молча
+    осело в Future, job навечно оставался queued/running, а минуты клиента —
+    списанными. Guard добивает job тем же CAS'ом: двойной возврат невозможен,
+    раз run_job уже зафиксировал терминальный статус раньше."""
+    try:
+        exc = fut.exception()
+    except BaseException:  # noqa: BLE001 — CancelledError/закрытый пул на shutdown
+        return
+    if exc is None:
+        return
+    log.error(f"worker future died for job={jid}: {exc!r}")
+    try:
+        if db.set_status_if(jid, "failed", ("queued", "running"),
+                            error="internal worker fault"):
+            db.add_job_event(jid, "failed", f"internal worker fault: {exc}"[:500])
+            job = db.get_job(jid)
+            if job:
+                billing.refund_job(job, reason="refund:worker_fault")
+    except Exception:  # noqa: BLE001 — guard не должен валить пул вторичным сбоем
+        log.exception("future guard itself failed for job=%s", jid)
+
+
 def _dispatch_job(jid: str) -> None:
     """Отправить job в пул. Если очередь пула переполнена — поток воркера
     подождёт в FIFO (ThreadPoolExecutor default)."""
-    _POOL.submit(pipeline.run_job, jid)
+    fut = _POOL.submit(pipeline.run_job, jid)
+    fut.add_done_callback(lambda f, _jid=jid: _job_future_guard(f, _jid))
 
 
 # --- WebSocket hub: broadcast job events to connected clients ---

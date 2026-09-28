@@ -88,10 +88,14 @@ function httpFallback(resp) {
 // blob downloads use fetch(), not api(): same localized failure text
 const httpError = (status) => new Error(httpFallback({ status }));
 function toast(msg, isErr = false) {
+  const wrap = $("#toasts");
+  // модалка через showModal() лежит над всеми z-index; отзыв во время
+  // открытой модалки обязан жить в том же top layer — иначе клиент молчит
+  try { wrap.showPopover && wrap.showPopover(); } catch (e) { /* уже открыт */ }
   const el = document.createElement("div");
   el.className = "toast" + (isErr ? " err" : "");
   el.textContent = msg;
-  $("#toasts").appendChild(el);
+  wrap.appendChild(el);
   // one feedback funnel: the phone feels what the screen just said
   haptic(isErr ? "error" : "success");
   setTimeout(() => el.remove(), 4200);

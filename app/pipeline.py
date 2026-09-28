@@ -796,7 +796,8 @@ def _execute(job: dict, deadline: float = 0) -> None:
         if len(voiced) > 2:
             db.add_job_event(jid, "tts",
                              f"casting: {len(voiced)} speakers share 2 voices (cycled)")
-        rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers)
+        rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers,
+                           deadline=deadline)
         # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
         # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую
         # нарезку. Числа финитные; путь файла наружу не идёт.
@@ -837,17 +838,22 @@ def _dub_schedule(segments: list[Segment], actuals: list[float],
 
 
 def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
-                 speakers: list[int] | None = None) -> dict:
+                 speakers: list[int] | None = None, deadline: float = 0) -> dict:
     rate = 22050
     # Два прохода, но НЕ удержанием всех голосов в памяти: первый проход измеряет
     # реальную длительность каждой реплики и оставляет PCM на диске (по одному
     # файлу на реплику), второй — перечитывает и подмешивает по одному файлу. Пик памяти —
     # O(одна строка), как в прежнем inline-микшере: cap ограничивает выходной буфер,
     # а этот приём не даёт входному накоплению стать тем, что съест RAM.
+    # Deadline проверяется в каждом проходе: синтез тысяч реплик или почасовая
+    # лента в python-цикле микширования может жрать минуты на реплику — микшер не должен
+    # переживать оплаченное окно молча; TimeoutError уходит в run_job → failed + refund.
     tmps: list[Path] = []
     actuals: list[float] = []
     try:
         for idx, s in enumerate(translated):
+            if deadline and time.monotonic() > deadline:
+                raise TimeoutError(f"job exceeded {JOB_TIMEOUT_SEC}s")
             tmp = art / f"line_{idx}_{int(s.start * 1000)}.wav"
             # speaker>0 chooses an alternate voice for this diarized speaker; 0/None
             # keeps the single primary voice (stub and non-diarized jobs unchanged).
@@ -866,6 +872,8 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
         starts, total, clipped = _dub_schedule(translated, actuals, cap_sec)
         samples = bytearray(int(total * rate) * 2)  # 16-bit mono
         for start, tmp in zip(starts, tmps):
+            if deadline and time.monotonic() > deadline:
+                raise TimeoutError(f"job exceeded {JOB_TIMEOUT_SEC}s")
             offset = int(start * rate) * 2
             if offset >= len(samples):
                 continue                        # весь голос за потолком — тишина
