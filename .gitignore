@@ -38,3 +38,9 @@ Thumbs.db
 
 # Node (if ever added)
 node_modules/
+
+# one-shot proof/patch artifacts from agent rounds
+_proof_*
+_commit.txt
+_fix_*.py
+_bump.py
