@@ -529,6 +529,44 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
           border-color: rgba(255, 183, 94, .35); }
 .player-head .lang-switch { margin-left: auto; }
 .player-head .btn { margin-left: 10px; }
+/* ───── публичная страница раздачи (/s/{id}) ─────
+   Открывается у получателя, у которого нет ни аккаунта, ни контекста: отсюда
+   только результат работы и срок ссылки. */
+.share-page { background: var(--bg); color: var(--ink); font-family: var(--font);
+              margin: 0; line-height: 1.55; }
+.share-wrap { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+.share-head h1 { font-size: clamp(20px, 4vw, 28px); margin: 6px 0 0; letter-spacing: -.01em; }
+.share-head .brand { color: var(--mint); font-weight: 800; letter-spacing: .08em;
+                     text-transform: uppercase; font-size: 13px; }
+.share-meta { display: flex; flex-wrap: wrap; gap: 8px 22px; list-style: none;
+              padding: 0; margin: 18px 0 0; font-size: 15px; }
+.share-meta li { min-width: 0; }
+.share-note { background: rgba(255, 183, 94, .12); border: 1px solid rgba(255, 183, 94, .35);
+              color: var(--amber); padding: 10px 14px; border-radius: var(--r-m);
+              font-size: 14px; }
+.share-wrap section { margin-top: 30px; }
+.share-wrap h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .07em;
+                 color: var(--ink-2); margin: 0 0 12px; }
+.art-list, .cue-list { list-style: none; margin: 0; padding: 0; }
+.art-list li { padding: 10px 0; border-bottom: 1px solid #222938; font-size: 15px; }
+.art-list a { color: var(--mint); text-decoration: none; font-weight: 600; }
+.art-list a:hover { text-decoration: underline; }
+.cue-list { list-style: decimal; padding-left: 22px; font-size: 15px;
+            overflow-wrap: anywhere; }
+.cue-list li { padding: 4px 0; color: var(--ink); }
+.share-wrap audio { width: 100%; margin: 4px 0 14px; }
+.share-foot { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 6px 16px;
+              align-items: baseline; font-size: 13px; }
+.share-foot a { color: var(--mint); }
+.share-wrap .dim { color: var(--ink-2); }
+/* Ссылку открывают с телефона, в мессенджере: на узком экране поле не должно
+ * упираться в край, а строка субтитра — вынуждать горизонтальный скролл. */
+@media (max-width: 600px) {
+  .share-wrap { padding: 22px 14px 48px; }
+  .share-meta { gap: 4px 14px; font-size: 14px; }
+  .cue-list { padding-left: 18px; font-size: 14px; overflow-wrap: anywhere; }
+  .art-list li { font-size: 14px; }
+}
 .pay-dlg { width: min(92vw, 430px); }
 #pay-body { padding: 0 20px 22px; }
 .pay-line { display: flex; justify-content: space-between; padding: 11px 2px; border-bottom: 1px solid #222938; font-size: 14px; }

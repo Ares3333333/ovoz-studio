@@ -18,12 +18,13 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from html import escape as _esc
 from pathlib import Path
 from typing import Optional
 
 from fastapi import (Depends, FastAPI, File, Form, Header, HTTPException,
                      Query, Request, UploadFile, WebSocket, WebSocketDisconnect)
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -1477,7 +1478,7 @@ def _caption_of(job: dict) -> dict:
         # Голос привязывается по накрытию временем, а не по номеру карточки:
         # диаризация считает реплики, вёрстка перекладывает карточки между ними,
         # и любой кэш индексов после этого был бы догадкой.
-        lines = [l for l in (dia.get("lines") or []) if isinstance(l, dict)]
+        lines = [row for row in (dia.get("lines") or []) if isinstance(row, dict)]
         for cue in cues:
             if cue["speaker"] is not None:
                 continue            # метка в строке — первичнее накрытия временем
@@ -1545,27 +1546,230 @@ def create_job_share(jid: str, user: dict = Depends(current_user),
     return {"share_id": sid, "share_url": f"/s/{sid}", "expires_hours": ttl_hours}
 
 
+# ---------- публичная страница раздачи ----------
+# Ссылку `/s/{id}` человек открывает в браузере, а не в curl: до этой версии его
+# встречал сырой JSON, то есть продукт отправлял получателя к файлу-протоколу
+# вместо результата. HTML отдаётся по Accept, JSON остаётся JSON — ключи не
+# менялись, потому что на них держатся тесты, SDK и кнопка «Поделиться».
+_SHARE_LABELS: dict[str, dict[str, str]] = {
+    "uz": {
+        "title": "Ovoz Studio — natija", "type": "Vazifa turi", "languages": "Til",
+        "minutes": "Daqiqa", "expires": "Havola amaliyati tugaydi",
+        "files": "Fayllar", "listen": "Tinglash", "preview": "Subtitr matni",
+        "empty": "Bu vazifada yuklab olish uchun fayl yo‘q.",
+        "demo": "Matn demo tanib olishdan olingan — haqiqiy ASR sozlanmagan.",
+        "expired": "Havolaning amaliyati tugagan.", "limit": "Yuklab olish chegarasi tugagan.",
+        "gone": "Havola topilmadi yoki o‘chirilgan.", "back": "Ovoz Studioga qaytish",
+        "cue_count": "qator", "footer": "Ovoz — turkiy past-resurs tillar uchun til infratuzilmasi.",
+        "type_subtitles": "Subtitrlar", "type_dubbing": "Dublyaj",
+        "type_transcribe": "Transkripsiya", "type_document": "Hujjat tarjimasi",
+        "cue_total": "ko'rsatilgan qatorlar", "expires_utc": "UTC", "rows": "qator",
+    },
+    "ru": {
+        "title": "Ovoz Studio — результат", "type": "Тип задачи", "languages": "Языки",
+        "minutes": "Минут", "expires": "Ссылка действует до",
+        "files": "Файлы", "listen": "Слушать", "preview": "Текст субтитров",
+        "empty": "У этой задачи нет файлов для скачивания.",
+        "demo": "Текст получен демо-распознаванием — реальный ASR не настроен.",
+        "expired": "Срок действия ссылки истёк.", "limit": "Лимит скачиваний исчерпан.",
+        "gone": "Ссылка не найдена или удалена.", "back": "Вернуться в Ovoz Studio",
+        "cue_count": "строк", "footer": "Ovoz — языковая инфраструктура для тюркских low-resource языков.",
+        "type_subtitles": "Субтитры", "type_dubbing": "Дубляж",
+        "type_transcribe": "Транскрипция", "type_document": "Перевод документа",
+        "cue_total": "всего строк", "expires_utc": "UTC", "rows": "строк",
+    },
+    "en": {
+        "title": "Ovoz Studio — result", "type": "Job type", "languages": "Languages",
+        "minutes": "Minutes", "expires": "Link expires",
+        "files": "Files", "listen": "Listen", "preview": "Subtitle text",
+        "empty": "This job has no files to download.",
+        "demo": "The text came from demo recognition — no live ASR is configured.",
+        "expired": "This link has expired.", "limit": "The download limit was reached.",
+        "gone": "Link not found.", "back": "Back to Ovoz Studio",
+        "cue_count": "lines", "footer": "Ovoz — language infrastructure for Turkic low-resource languages.",
+        "type_subtitles": "Subtitles", "type_dubbing": "Dubbing",
+        "type_transcribe": "Transcription", "type_document": "Document translation",
+        "cue_total": "lines shown", "expires_utc": "UTC", "rows": "lines",
+    },
+}
+_SHARE_MAX_CUES = 60          # страница для чтения, а не перенос всего файла
+# Ответ `/s/{id}` зависит и от `Accept` (страница или данные), и от
+# `Accept-Language` (какой язык), и меняется со временем (срок, лимит скачиваний).
+# Без `Vary` браузер или CDN отдаёт кэшированную страницу клиенту SDK — живой QA
+# воспроизвёл это 3/3: JSON-запрос получил HTML. Без `no-store` кэш устаревшей
+# ссылкой выглядит живым.
+_SHARE_HEADERS = {"Vary": "Accept, Accept-Language",
+                  "Cache-Control": "no-store"}
+# Наружные имена файлов. Отделяются от `kind` в базе так же, как в карточке
+# владельца: `align` — это имя колонки, а человек читает «JIMLIK». Гейт сверяет
+# набор с `_JOB_ARTIFACT_KINDS`, чтобы новый вид артефакта не остался без имени.
+_SHARE_ARTIFACT_LABELS = {
+    "transcript": "TXT", "srt": "SRT", "srt_bilingual": "SRT 2×", "ass": "ASS",
+    "ass_karaoke": "ASS ♪", "dubbing": "WAV ♪", "document": "DOC",
+    "diarization": "TURN", "align": "JIMLIK", "words": "SOʻZ",
+    "layout": "QATOR",
+}
+
+
+def _share_lang(header: str) -> str:
+    """Язык страницы из Accept-Language; по умолчанию узбекский — как у лендинга."""
+    for tag in (header or "").split(","):
+        code = tag.split(";")[0].strip()[:2].lower()
+        if code in _SHARE_LABELS:
+            return code
+    return "uz"
+
+
+def _wants_html(accept: str) -> bool:
+    """Браузер просит страницу; клиент SDK просит данные. Разница видна в Accept."""
+    first = (accept or "*/*").split(",")[0].strip().lower()
+    return first.startswith("text/html") or "application/xhtml" in (accept or "")
+
+
+def _share_kind_label(kind: str) -> str:
+    """Наружное имя файла — то же, что видит владелец в чипах карточки."""
+    return _SHARE_ARTIFACT_LABELS.get(kind, kind.upper())
+
+
+def esc(value) -> str:
+    """Экран для страницы: карточки субтитров — текст клиента, и открытая ссылка не
+    должна превращаться в исполняемую страницу чужого сайта."""
+    return _esc(str(value if value is not None else ""), quote=True)
+
+
+def _share_cues(jid: str) -> tuple[list[str], int]:
+    """Строки предпросмотра и полное их число: диапазон, а не только начало.
+
+    Кому пришла ссылка, надо понять, насколько плотные субтитры получились: строка
+    без конца ряда это ещё и цитата без длительности, а «показаны 2 из 41»
+    отличается от «показаны 2» ровно так же, как отчёт без `truncated`.
+    """
+    path = db.get_artifact(jid, "srt")
+    if not path or not Path(path).exists():
+        return [], 0
+    try:
+        parsed = srt_mod.parse_srt(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return [], 0
+    rows = []
+    for cue in parsed[:_SHARE_MAX_CUES]:
+        speaker, text = _cue_tag(cue.text or "")
+        line = ("[S%d] " % speaker if speaker else "") + " ".join(text.split())
+        rows.append("%s --> %s  %s" % (srt_mod.format_timecode(_num(cue.start)),
+                                        srt_mod.format_timecode(_num(cue.end)),
+                                        line[:300]))
+    return rows, len(parsed)
+
+
+def _share_html(sid: str, share: dict, job: dict, arts: dict, lang: str) -> str:
+    """Страница результата: что это, чьё, до скольки, и сам текст субтитров.
+
+    Ни одного инлайн-обработчика и ни одного доверия к содержимому: карточки
+    субтитров — текст клиента, он экранируется, иначе открытая ссылка становится
+    исполняемой страницей чужого сайта.
+    """
+    L = _SHARE_LABELS[lang]
+    meta = job.get("meta") or {}
+    cues, total_cues = _share_cues(share["job_id"])
+    # Порядок — тот же, что в карточке владельца (`_JOB_ARTIFACT_KINDS`), а не
+    # алфавит колонок базы: получателю показывают результат работы, а не перечень
+    # таблиц.
+    files = "".join(
+        f'<li><a href="{esc(url)}">{esc(_share_kind_label(kind))}</a>'
+        + (f' <span class="dim">{esc(L["listen"])}</span>' if kind == "dubbing" else "")
+        + "</li>" for kind, url in arts.items())
+    audio = (f'<audio controls src="/s/{esc(sid)}/dl/dubbing"></audio>'
+             if "dubbing" in arts else "")
+    preview = "".join(f"<li>{esc(row)}</li>" for row in cues)
+    cut = (f'<p class="dim">{len(cues)} / {total_cues} {esc(L["cue_total"])}</p>'
+           if total_cues > len(cues) else "")
+    minutes = _num(job.get("minutes"))
+    jtype = str(job.get("type") or share.get("job_type") or "")
+    type_label = L.get("type_" + jtype, jtype)
+    parts = [
+        '<!DOCTYPE html><html lang="', esc(lang), '"><head>',
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<title>', esc(L["title"]), '</title>',
+        '<link rel="stylesheet" href="/styles.css">',
+        '</head><body class="share-page"><main class="share-wrap">',
+        '<header class="share-head"><span class="brand">Ovoz</span>',
+        '<h1>', esc(type_label), '</h1></header>',
+        '<ul class="share-meta">',
+        '<li><span class="dim">', esc(L["type"]), '</span> ', esc(type_label), '</li>',
+        '<li><span class="dim">', esc(L["languages"]), '</span> ',
+        esc("%s → %s" % (job.get("src", ""), job.get("tgt", ""))), '</li>',
+        '<li><span class="dim">', esc(L["minutes"]), '</span> ',
+        esc("%g" % minutes), '</li>',
+        '<li><span class="dim">', esc(L["expires"]), '</span> ',
+        esc(str(share.get("expires_at", ""))[:16].replace("T", " ")), ' ',
+        esc(L["expires_utc"]), '</li>',
+        '</ul>',
+        ('<p class="share-note">' + esc(L["demo"]) + '</p>') if meta.get("asr_demo") else "",
+        ('<section><h2>' + esc(L["files"]) + '</h2>' + audio
+         + '<ul class="art-list">'
+         + (files or ('<li class="dim">' + esc(L["empty"]) + '</li>'))
+         + '</ul></section>') if arts else ('<p class="dim">' + esc(L["empty"]) + '</p>'),
+        ('<section><h2>' + esc(L["preview"]) + '</h2><ol class="cue-list">' + preview
+         + '</ol>' + cut + '</section>') if preview else "",
+        '<footer class="share-foot"><a href="/">', esc(L["back"]), '</a>',
+        '<span class="dim">', esc(L["footer"]), '</span></footer>',
+        '</main></body></html>',
+    ]
+    return "".join(parts)
+
+
+def _share_error_html(status: int, key: str, lang: str) -> str:
+    L = _SHARE_LABELS[lang]
+    msg = {404: L["gone"], 410: L["expired"]}.get(status, L["gone"])
+    if status == 410 and key == "share_limit":
+        msg = L["limit"]
+    return (f'<!DOCTYPE html><html lang="{esc(lang)}"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{esc(L["title"])}</title>'
+            f'<link rel="stylesheet" href="/styles.css"></head>'
+            f'<body class="share-page"><main class="share-wrap">'
+            f'<p class="share-note">{esc(msg)}</p>'
+            f'<p><a href="/">{esc(L["back"])}</a></p></main></body></html>')
+
+
 @app.get("/s/{sid}", tags=["jobs"])
-def share_page(sid: str) -> JSONResponse:
-    """Public (no auth) share page: lists artifacts for anonymous download."""
+def share_page(sid: str, request: Request):
+    """Публичная (без авторизации) страница результата: файлы, прослушивание даббинга
+    и сам текст субтитров. Ответ отдаётся по `Accept`: браузеру — страница, SDK —
+    тот же JSON, что и раньше.
+
+    Исходник раздачи — записи клиента, наружу идут только результаты работы.
+    """
+    html_wanted = _wants_html(request.headers.get("accept", ""))
+    lang = _share_lang(request.headers.get("accept-language", ""))
+
+    def fail(status: int, key: str, detail: str):
+        if html_wanted:
+            return HTMLResponse(_share_error_html(status, key, lang), status_code=status,
+                                headers=_SHARE_HEADERS)
+        return JSONResponse({"detail": detail, "error_code": key}, status_code=status,
+                            headers=_SHARE_HEADERS)
+
     share = db.get_share(sid)
     if not share:
-        raise HTTPException(404, "Share not found")
-    # check expiry
+        return fail(404, "not_found", "Share not found")
     if share["expires_at"] < db.now_iso():
-        raise HTTPException(410, "Share link expired")
-    # check download limit
+        return fail(410, "share_expired", "Share link expired")
     if share["max_downloads"] > 0 and share["download_count"] >= share["max_downloads"]:
-        raise HTTPException(410, "Download limit reached")
+        return fail(410, "share_limit", "Download limit reached")
     arts = {}
     for kind in _JOB_ARTIFACT_KINDS:
         p = db.get_artifact(share["job_id"], kind)
         if p:
             arts[kind] = f"/s/{sid}/dl/{kind}"
-    return JSONResponse({
-        "job_type": share["job_type"], "artifacts": arts,
-        "expires_at": share["expires_at"],
-    })
+    payload = {"job_type": share["job_type"], "artifacts": arts,
+               "expires_at": share["expires_at"]}
+    if not html_wanted:
+        return JSONResponse(payload, headers=_SHARE_HEADERS)
+    job = db.get_job(share["job_id"]) or {}
+    return HTMLResponse(_share_html(sid, share, job, arts, lang),
+                        headers=_SHARE_HEADERS)
 
 
 @app.get("/s/{sid}/dl/{kind}", tags=["jobs"])
