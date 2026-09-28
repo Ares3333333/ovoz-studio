@@ -164,7 +164,14 @@ def refuse(audio, fields=None, ctype="audio/wav"):
         st, rep = post(audio, fields, ctype)
         return st, json.dumps(rep)[:200]
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")[:200]
+        # A refusal body can arrive on a connection the server already gave up on
+        # (it answered before reading the tape): reading it must not be the reason
+        # the probe dies. Status is the answer; the body is commentary.
+        try:
+            raw = e.read()
+        except OSError:
+            raw = b"{\"_reset\": true}"
+        return e.code, raw.decode("utf-8", "replace")[:200]
 
 
 # Cues written against the cell structure of dip_tape(): one real pause in front

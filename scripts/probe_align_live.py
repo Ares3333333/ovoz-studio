@@ -12,14 +12,13 @@ is shipped, so nothing can be tuned to one tape.
 
 Usage: python scripts/probe_align_live.py <base_url>
 """
-import io
+import http.client as http_client
 import json
 import math
 import sys
 import time
 import urllib.error
 import urllib.request
-import wave
 from array import array
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -102,10 +101,30 @@ def send(fields, blob, ctype="audio/wav", wait=True):
     """
     for attempt in range(10):
         st, hdr, payload = _send_once(fields, blob, ctype)
+        if st == 0 and wait:
+            # refused mid-flight by a closed socket: obey the throttle's own window
+            # and try again rather than dying on a refusal we are allowed to give
+            time.sleep(5)
+            continue
         if st != 429 or not wait:
             return st, hdr, payload
         time.sleep(min(int(hdr.get("Retry-After") or 5), 65))
     return st, hdr, payload
+
+
+def _read_best_effort(fp):
+    """The body of a refusal, or whatever a reset connection let through.
+
+    A server that answers 429 while the client is still uploading a tape is allowed
+    to hang up: the bytes still in flight get a connection reset instead of a
+    status line, on Windows as an exception raised *while reading*. That is a
+    refusal, and a probe that crashes on it would report the product as broken
+    because the probe could not survive being told no.
+    """
+    try:
+        return fp.read()
+    except (OSError, http_client.IncompleteRead):
+        return b""
 
 
 def _send_once(fields, blob, ctype):
@@ -117,12 +136,15 @@ def _send_once(fields, blob, ctype):
         with urllib.request.urlopen(req, timeout=60) as r:
             return r.status, dict(r.headers), json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raw = e.read()
+        raw = _read_best_effort(e)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
             payload = {"_raw": raw[:200].decode("utf-8", "replace")}
         return e.code, dict(e.headers), payload
+    except OSError as e:
+        # No status at all: the socket was closed before the answer arrived.
+        return 0, {}, {"_reset": type(e).__name__}
 
 
 LINES = json.dumps([{"start": 0.0, "end": 1.2, "text": "Birinchi qator."},

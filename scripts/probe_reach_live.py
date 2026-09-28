@@ -74,7 +74,13 @@ def call(path, data=None, token=None, ctype=None, raw=None):
         with urllib.request.urlopen(req, timeout=180) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        # A refusal can arrive on a connection the server already gave up on (it
+        # answers a busy listener before reading the tape). Status is the answer;
+        # the body is commentary, and losing it must not kill the probe.
+        try:
+            return e.code, e.read()
+        except OSError:
+            return e.code, b'{"_reset": true}'
 
 
 def jget(path, token=None):

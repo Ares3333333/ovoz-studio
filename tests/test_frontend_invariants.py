@@ -885,6 +885,28 @@ def test_the_preview_routes_are_owner_only_and_never_name_a_path():
     assert '410' in media, "a purged source must not look like a missing job"
 
 
+def test_the_live_probes_survive_being_told_no():
+    """A probe that crashes on a refusal reports the product as broken.
+
+    The listening routes answer 429 *before* reading the tape, which is the whole
+    point of the early refusal; on Windows the client then sees the connection reset
+    while it is still reading the error body, and `e.read()` raised out of a probe
+    made a green server look red — twice from the same batch, once from an
+    identical rerun seconds later. A refusal is an answer, so reading it is
+    best-effort everywhere a probe handles HTTPError.
+    """
+    scripts = (STATIC.parent / "scripts").glob("probe_*_live.py")
+    bad = []
+    for path in scripts:
+        src = path.read_text(encoding="utf-8")
+        for block in re.findall(r"except urllib\.error\.HTTPError as \w+:\n((?:[ \t]+.*\n)+)",
+                                src):
+            if re.search(r"= e\.read\(\)|return e\.code, e\.read\(\)", block) \
+                    and "try:" not in block:
+                bad.append("%s: %s" % (path.name, block.strip().splitlines()[0][:60]))
+    assert not bad, f"a probe reads a refusal body without surviving a reset: {bad}"
+
+
 def test_document_carries_no_executable_inline_script():
     """The CSP is only as strong as the document that lets it stay strict.
 

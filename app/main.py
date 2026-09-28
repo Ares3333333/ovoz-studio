@@ -652,7 +652,13 @@ async def security_headers(request: Request, call_next):
                 status_code=429,
                 content={"detail": "language listeners are busy: two tapes at a time",
                          "error_code": ErrorCode.RATE_LIMITED.value},
-                headers={"Retry-After": "5"},
+                # Retry-After says when to come back; Connection: close says what
+                # happens to the tape still in flight. Answering before the body is
+                # read leaves unread request bytes on a keep-alive socket — the same
+                # half-duplicated connection the 413 above refuses to leave open, and
+                # a client that keeps sending into a hangup deserves an orderly
+                # close, not a reset in the middle of its own upload.
+                headers={"Retry-After": "5", "Connection": "close"},
             )
     # An upload route with no Content-Length is a hole, not a corner case: Starlette
     # streams multipart *file* parts into a temp file with no per-part cap (only
