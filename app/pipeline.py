@@ -542,8 +542,12 @@ def run_job(job_id: str) -> None:
     job = db.get_job(job_id)
     if not job:
         return
-    if not db.set_status_if(job_id, "running", ("queued", "running")):
-        return  # статус уже увёл в другую сторону (например, canceled)
+    # Исключительный захват: "running" в допущенных состояниях означало, что
+    # второй воркер (двойной dispatch при retry, пересекающиеся recovery двух
+    # процессов) мог войти в _execute по уже работающему job — два синтеза,
+    # два микшера, взаимное удаление temp-файлов и двойная трата бюджета.
+    if not db.set_status_if(job_id, "running", ("queued",)):
+        return  # статус уже увёл в другую сторону (canceled/running/done)
     job = db.get_job(job_id)
     db.add_job_event(job_id, "start", f"type={job['type']} {job['src']}->{job['tgt']}")
     deadline = time.monotonic() + JOB_TIMEOUT_SEC

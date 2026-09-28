@@ -443,17 +443,26 @@ def set_status_if(jid: str, new_status: str, allowed: tuple[str, ...],
 
 
 def recover_stale_jobs() -> list[dict]:
-    """После рестарта воркеров нет: queued/running → failed (возврат делает billing)."""
-    cur = get_conn()
-    rows = cur.execute("SELECT * FROM jobs WHERE status IN ('queued','running')").fetchall()
-    stale = [dict(r) for r in rows]
-    if stale:
-        cur.execute(
+    """После рестарта воркеров нет: queued/running → failed (возврат делает billing).
+    Переход — построчным CAS'ом: при двух пересекающихся boot (crash-loop,
+    старт нового контейнера до drain старого) SELECT-then-bulk-UPDATE возвращал
+    оба полных списка, и каждый победитель возвращал минуты — чистая эмиссия
+    кредитов. Возвращаем только строки, которые проиграли гонку НЕТ: rowcount==1."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE status IN ('queued','running')").fetchall()
+    recovered: list[dict] = []
+    for r in rows:
+        cur = conn.execute(
             "UPDATE jobs SET status='failed', error='worker restart', updated_at=? "
-            "WHERE status IN ('queued','running')", (now_iso(),),
+            "WHERE id=? AND status IN ('queued','running')",
+            (now_iso(), r["id"]),
         )
-        cur.commit()
-    return stale
+        if cur.rowcount > 0:
+            recovered.append(dict(r))
+    if recovered:
+        conn.commit()
+    return recovered
 
 
 def cancel_job(jid: str) -> bool:
@@ -488,6 +497,10 @@ def delete_job(jid: str, *, unlink_files: bool = False) -> None:
             paths.append(r["path"])
     conn.execute("DELETE FROM job_events WHERE job_id = ?", (jid,))
     conn.execute("DELETE FROM artifacts WHERE job_id = ?", (jid,))
+    # shares.job_id REFERENCES jobs(id) с включённым FK: без этой строки
+    # удаление аккаунта у клиента, делившегося ссылкой, падало в IntegrityError —
+    # т.е. GDPR-забвение ломалось ровно у тех, кто пользовался платной фичей.
+    conn.execute("DELETE FROM shares WHERE job_id = ?", (jid,))
     conn.execute("DELETE FROM jobs WHERE id = ?", (jid,))
     conn.commit()
     if unlink_files:
@@ -751,6 +764,17 @@ def refund_exists(uid: str, job_id: str) -> bool:
     row = get_conn().execute(
         "SELECT 1 FROM ledger WHERE user_id = ? AND ref = ? AND reason LIKE 'refund:%' LIMIT 1",
         (uid, job_id),
+    ).fetchone()
+    return row is not None
+
+
+def payment_credited(external_id: str) -> bool:
+    """Есть ли в ledger начисление под этот платёж. payments.insert и ledger.credit —
+    два разных коммита: если второй упал, PSP-повтор обязан починить начисление,
+    а не получить вежливый 'duplicate' навсегда."""
+    row = get_conn().execute(
+        "SELECT 1 FROM ledger WHERE ref = ? AND reason LIKE 'payment:%' LIMIT 1",
+        (external_id,),
     ).fetchone()
     return row is not None
 

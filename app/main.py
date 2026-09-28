@@ -310,7 +310,18 @@ def _job_future_guard(fut, jid: str) -> None:
 def _dispatch_job(jid: str) -> None:
     """Отправить job в пул. Если очередь пула переполнена — поток воркера
     подождёт в FIFO (ThreadPoolExecutor default)."""
-    fut = _POOL.submit(pipeline.run_job, jid)
+    try:
+        fut = _POOL.submit(pipeline.run_job, jid)
+    except RuntimeError:
+        # Пул закрыт на shutdown: future не будет создано, guard не сработает,
+        # и минутa зависнет на вечно-queued job. Добиваем сами — тем же CAS'ом.
+        log.error("dispatch refused: worker pool shutting down (job=%s)", jid)
+        if db.set_status_if(jid, "failed", ("queued",), error="server is shutting down"):
+            db.add_job_event(jid, "failed", "server is shutting down")
+            job = db.get_job(jid)
+            if job:
+                billing.refund_job(job, reason="refund:shutdown")
+        return
     fut.add_done_callback(lambda f, _jid=jid: _job_future_guard(f, _jid))
 
 
@@ -1298,11 +1309,15 @@ def retry_job(jid: str, user: dict = Depends(current_user)) -> dict:
     if db.count_active_jobs(user["id"]) >= MAX_ACTIVE_JOBS_PER_USER:
         raise HTTPException(429, f"Too many active jobs (max {MAX_ACTIVE_JOBS_PER_USER})",
                             headers={"Retry-After": "60"})
-    if not db.claim_for_retry(jid):  # сначала атомарно захватываем статус…
-        raise HTTPException(409, "Retry already in progress")
     if not billing.debit(user["id"], job["minutes"], f"job:{jid}", ref=jid):
-        db.update_job(jid, status=job["status"])  # откатили статус, деньги не взялись
         raise HTTPException(402, "Insufficient credits for retry")
+    # Деньги — до захвата статуса, и захват проигрывает строго в queued: при
+    # обратном порядке (claim→debit) отмена, вклинившаяся между ними, возвращала
+    # минуты, которых в этом цикле не брали — эмиссия кредитов из ничего. Теперь
+    # на любой refund есть парный debit; проигравший claim просто отдаёт своё.
+    if not db.claim_for_retry(jid):
+        billing.refund_job(job, reason="refund:retry")
+        raise HTTPException(409, "Retry already in progress")
     db.update_job(jid, error=None)
     db.add_job_event(jid, "requeued", "user retry")
     if settings.sync_pipeline:
@@ -2003,8 +2018,13 @@ def create_webhook_endpoint(user: dict = Depends(current_user),
     """Register an outbound webhook URL. Studio plan required."""
     if user.get("plan", "free") != "studio":
         raise HTTPException(403, "Webhooks require Studio plan")
-    if not url.startswith("https://"):
-        raise HTTPException(422, "Webhook URL must be HTTPS")
+    # HTTPS-prefix alone is not an SSRF control (see webhooks.safe_webhook_url):
+    # a redirecting host or a DNS-rebound name walks the server POST inside the
+    # private network. Resolve and classify now; send-time re-checks every retry.
+    from .webhooks import safe_webhook_url
+    reason = safe_webhook_url(url)
+    if reason is not None:
+        raise HTTPException(422, f"Webhook URL refused: {reason}")
     existing = db.list_webhooks(user["id"])
     if len(existing) >= 5:
         raise HTTPException(422, "Max 5 webhooks per user")

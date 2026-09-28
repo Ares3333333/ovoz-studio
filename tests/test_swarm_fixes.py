@@ -124,3 +124,99 @@ def test_toasts_live_in_the_top_layer_next_to_the_dialogs():
     assert "background: transparent" in block
     assert "border: 0; padding: 0" in block, "UA popover border/padding would frame the toasts"
     assert "bottom: 22px" in block, "the build-stamped mobile placement must survive"
+
+
+# --- Round 35: the seven-agent full re-audit's money/security haul -----------
+
+def test_retry_without_credits_leaves_the_canceled_job_untouched(client, auth, tmp_path):
+    """The bug: claim->debit meant a debit failure rolled status back with a BLIND
+    write, and a cancel landing between them refunded minutes never charged --
+    credit minting. Debit-first: an underfunded retry must change nothing."""
+    from app import billing, db
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    src = tmp_path / "x.srt"
+    src.write_text("1\n00:00:00,000 --> 00:00:01,000\nsalom\n", encoding="utf-8")
+    job = db.create_job(uid, "subtitles", "ru", "uz", 50.0, str(src), {})
+    db.update_job(job["id"], status="canceled")
+    bal = billing.balance(uid)  # nowhere near 50
+    r = client.post(f"/api/jobs/{job['id']}/retry", headers=auth)
+    assert r.status_code == 402
+    assert db.get_job(job["id"])["status"] == "canceled", "blind rollback stomped the state machine"
+    assert billing.balance(uid) == bal, "a refused retry must move no money"
+
+
+def test_recover_stale_jobs_refunds_each_row_at_most_once(client, auth):
+    """Two overlapping boots used to SELECT all, UPDATE all, and refund all --
+    twice. Per-row CAS means the second recovery sees nothing."""
+    from app import db
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    job = db.create_job(uid, "subtitles", "ru", "uz", 1.0, "x.srt", {})
+    first = db.recover_stale_jobs()
+    assert any(j["id"] == job["id"] for j in first)
+    assert db.recover_stale_jobs() == [], "a row may be recovered by exactly one boot"
+
+
+def test_delete_job_survives_share_rows(client, auth):
+    """shares.job_id is an enforced FK: delete_job without share cleanup raised
+    IntegrityError, so GDPR erasure 500-ed for every customer who ever used the
+    paid share link -- sessions killed, data left, no self-service recovery."""
+    from app import db
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    job = db.create_job(uid, "subtitles", "ru", "uz", 1.0, "x.srt", {})
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO shares (id, job_id, user_id, created_at, expires_at) VALUES (?,?,?,?,?)",
+        (db.new_id(), job["id"], uid, db.now_iso(), db.now_iso()))
+    conn.commit()
+    db.delete_job(job["id"])  # used to raise sqlite3.IntegrityError
+    assert db.get_job(job["id"]) is None
+
+
+def test_payment_replay_repairs_a_missing_credit(client, auth):
+    """payments.insert and ledger.credit were separate commits: a crash between
+    them made every PSP replay answer 'duplicate' and the paid amount vanished
+    forever. The duplicate branch now verifies the credit and completes it."""
+    from app import billing, db
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    # simulate: payment recorded, credit lost
+    db.create_payment(uid, "payme", "ext-repair-1", 12_000_000, "UZS", 120.0)
+    assert not db.payment_credited("ext-repair-1")
+    bal0 = billing.balance(uid)
+    out = billing.apply_payment_webhook("payme", "ext-repair-1", uid,
+                                        12_000_000, "UZS", 120.0)
+    assert out["status"] == "duplicate"
+    assert billing.balance(uid) == pytest.approx(bal0 + 120), "replay must repair the credit"
+    # and remain exactly once on a third delivery
+    billing.apply_payment_webhook("payme", "ext-repair-1", uid, 12_000_000, "UZS", 120.0)
+    assert billing.balance(uid) == pytest.approx(bal0 + 120)
+
+
+def test_safe_webhook_url_shuts_the_private_network_door():
+    """The paid Studio webhook sender was an open SSRF proxy: startswith('https://')
+    blocks nothing that matters. Literal private/link-local targets must all fail
+    closed; a plain public IP passes without needing DNS."""
+    from app.webhooks import safe_webhook_url
+
+    assert safe_webhook_url("http://example.com/hook") is not None      # not https
+    assert safe_webhook_url("https://127.0.0.1:8080/hook") is not None  # loopback
+    assert safe_webhook_url("https://169.254.169.254/latest/meta-data/") is not None
+    assert safe_webhook_url("https://10.0.0.5/hook") is not None        # RFC1918
+    assert safe_webhook_url("https://172.16.0.9/hook") is not None
+    assert safe_webhook_url("https://user:pass@example.com/") is not None  # userinfo
+    assert safe_webhook_url("https://8.8.8.8/hook") is None             # public, no DNS needed
+
+
+def test_webhook_registration_refuses_internal_targets(client, auth):
+    """End-to-end through the paid endpoint, not just the helper."""
+    from app import db
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    db.set_user_plan(uid, "studio")
+    r = client.post("/api/webhooks", headers=auth,
+                    data={"url": "https://169.254.169.254/hook", "events": "job.done"})
+    assert r.status_code == 422
+    assert "private" in r.json()["detail"].lower() or "refused" in r.json()["detail"].lower()

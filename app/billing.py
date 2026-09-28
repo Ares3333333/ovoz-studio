@@ -5,7 +5,11 @@
 """
 from __future__ import annotations
 
+import logging
+
 from . import db
+
+log = logging.getLogger("ovoz.billing")
 
 PLANS = {
     "free":  {"name": "Boshlang'ich",  "price_usd": 0,  "minutes": 10},
@@ -65,6 +69,7 @@ def apply_payment_webhook(provider: str, external_id: str, uid: str,
     """
     existing = db.find_payment(external_id)
     if existing:
+        _ensure_credited(existing)
         return {"status": "duplicate", "payment": existing}
     plan_key, plan = _plan_for_price(provider, amount_minor, currency)
     if plan is None:
@@ -79,6 +84,8 @@ def apply_payment_webhook(provider: str, external_id: str, uid: str,
         if "UNIQUE" in str(exc).upper():
             # lost race: another thread inserted it first
             dup = db.find_payment(external_id)
+            if dup:
+                _ensure_credited(dup)
             return {"status": "duplicate", "payment": dup or {}}
         raise
     credit(uid, credited_minutes, f"payment:{provider}", ref=external_id)
@@ -96,6 +103,21 @@ MAX_WEBHOOK_MINUTES = 600.0  # страхующий потолок на одно
 
 # Plan priority: never downgrade on payment
 PLAN_PRIORITY = {"free": 0, "pro": 1, "studio": 2}
+
+
+def _ensure_credited(payment: dict) -> None:
+    """Самопочинка разорванного платежа. create_payment и credit — два коммита:
+    если второй упал (лок БД, диск, OOM, деплой), строка payments уже живёт, и
+    каждый повтор PSP получал бы вежливый 'duplicate' без денег — вечная потеря
+    оплаты. Повтор теперь проверяет начисление и довершает его."""
+    if db.payment_credited(payment["external_id"]):
+        return
+    minutes = float(payment.get("minutes") or 0)
+    if minutes <= 0 or minutes > MAX_WEBHOOK_MINUTES:
+        return  # повреждённая строка — пусть разбирается человек, не генератор
+    credit(payment["user_id"], minutes, f"payment:{payment['provider']}",
+           ref=payment["external_id"])
+    log.warning("payment %s repaired: credit applied on PSP replay", payment["external_id"])
 
 
 def _plan_for_price(provider: str, amount_minor: int, currency: str) -> tuple[str | None, dict | None]:

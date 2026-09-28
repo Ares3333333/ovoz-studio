@@ -51,3 +51,7 @@ _*.ps1
 _verify_out.txt
 _finish.py
 _patch_toast.py
+
+_audit_state.txt
+_fix_indent.py
+_bump*.py
