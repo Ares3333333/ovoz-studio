@@ -621,7 +621,7 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
 #toasts {
   position: fixed; top: auto; right: auto; bottom: 22px; left: 50%;
   transform: translateX(-50%); margin: 0; max-width: 92vw; overflow: visible;
-  background: transparent; color: inherit; /* UA рисует popover как «bubblenorm»-белый */
+  background: transparent; color: inherit; border: 0; padding: 0; /* UA popover sheet: bubblenorm white + border + 0.25em padding */
   z-index: 60; display: grid; gap: 8px;
 }
 .toast {

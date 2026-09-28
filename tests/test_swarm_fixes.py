@@ -113,8 +113,14 @@ def test_toasts_live_in_the_top_layer_next_to_the_dialogs():
     js = (root / "app.js").read_text(encoding="utf-8")
     css = (root / "styles.css").read_text(encoding="utf-8")
     assert 'id="toasts" aria-live="polite" popover="manual"' in html
-    assert "showPopover" in js, "nothing ever opens the popover container"
-    # UA paints popovers with a white "bubblenorm" sheet; the toast grid is transparent
+    # re-elevation, not merely opening: a popover opened before the modal sits UNDER
+    # it (top-layer order = append order), so every toast must hide-then-show to be
+    # re-appended on top -- otherwise the fix only works for the first toast.
+    assert "if (wrap.isOpen) wrap.hidePopover();" in js, \
+        "a toast fired before a modal would stay beneath it"
+    assert "wrap.showPopover();" in js, "nothing ever opens the popover container"
+    # UA paints popovers with a white "bubblenorm" sheet + border + padding; the grid is transparent
     block = css[css.index("#toasts"):css.index("#toasts") + 400]
     assert "background: transparent" in block
+    assert "border: 0; padding: 0" in block, "UA popover border/padding would frame the toasts"
     assert "bottom: 22px" in block, "the build-stamped mobile placement must survive"

@@ -90,8 +90,17 @@ const httpError = (status) => new Error(httpFallback({ status }));
 function toast(msg, isErr = false) {
   const wrap = $("#toasts");
   // модалка через showModal() лежит над всеми z-index; отзыв во время
-  // открытой модалки обязан жить в том же top layer — иначе клиент молчит
-  try { wrap.showPopover && wrap.showPopover(); } catch (e) { /* уже открыт */ }
+  // открытой модалки обязан жить в том же top layer — иначе клиент молчит.
+  // Порядок отрисовки в top layer = порядок добавления: если тост уже был
+  // открыт ДО модалки, модалка добавлена позже и перекрывает её. Поэтому
+  // каждый тост обязан ВЫНУТЬ контейнер из top layer и ВЕРНУТЬ его — иначе
+  // повторный showPopover() бросает InvalidStateError и тост снова под модалкой.
+  try {
+    if (wrap.showPopover) {
+      if (wrap.isOpen) wrap.hidePopover();
+      wrap.showPopover();
+    }
+  } catch (e) { /* браузер без popover — обычный fixed-рендер ниже */ }
   const el = document.createElement("div");
   el.className = "toast" + (isErr ? " err" : "");
   el.textContent = msg;

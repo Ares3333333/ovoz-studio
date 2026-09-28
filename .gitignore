@@ -44,3 +44,10 @@ _proof_*
 _commit.txt
 _fix_*.py
 _bump.py
+
+# live-QA one-shot artifacts (Round 34)
+_*.log
+_*.ps1
+_verify_out.txt
+_finish.py
+_patch_toast.py
