@@ -1301,3 +1301,36 @@ def test_uz_is_the_default_language_for_a_fresh_visitor():
     """UZ-first product: an EN-browser visitor landing on EN is landing on the
     wrong market. Language still sticks after a manual switch."""
     assert 'localStorage.getItem("ovoz_lang") || "uz"' in I18N
+
+
+def test_telegram_theme_maps_every_panel_variable():
+    """User screenshot 29.09: Telegram LIGHT theme, and --surface-2 — the most
+    used panel variable in the app (segments, selects, toasts, chips) — was
+    never mapped, so dark #171b25 pills sat on a white page reading dark-on-dark.
+    The theme pass must derive surface-2, declare color-scheme to native
+    controls, and reflect the header color into theme-color for the host."""
+    body = _fn_body("applyTgTheme")
+    assert "'--surface-2'" in body, "surface-2 unmapped again"
+    assert "colorScheme" in body, "native selects stay dark on a light page"
+    assert "theme-color" in body
+    assert "_tgLum" in body and "_tgMix" in body
+
+
+def test_the_phone_segmented_control_is_two_by_two():
+    """Four 92px-min segments overflow 342px: the 3rd tab clipped and the 4th
+    fell alone (screenshot). A 2x2 grid is the readable phone shape."""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    mobile = css[css.index("@media (max-width: 680px)"):
+                 css.index("@media (max-width: 680px)") + 3000]
+    assert ".seg { display: grid; grid-template-columns: 1fr 1fr; }" in mobile
+    assert ".seg button { min-width: 0; }" in mobile
+
+
+def test_nav_and_cta_read_the_theme_variables_with_the_old_dark_as_fallback():
+    """--nav-bg/--mint-ink were dead in both directions: JS set them, CSS never
+    read them. The fallback must stay the original dark, so the web build (no
+    Telegram) is pixel-identical to before the theming pass."""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    assert "--nav-bg: #0b0d12;" in css and "--mint-ink: #06210f;" in css
+    assert "var(--nav-bg" in css, "the nav still hardcodes its dark"
+    assert "color: var(--mint-ink)" in css, "the CTA text ignores button_text_color"

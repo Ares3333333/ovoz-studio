@@ -1010,17 +1010,45 @@ function form(obj) { const fd = new FormData(); Object.entries(obj).forEach(([k,
 // The boot call itself lives at the bottom of this file, next to the other
 // bootstrap statements: see telegramBoot(). Everything it touches synchronously
 // (job state, caches, painters) must already be initialized by then.
+function _tgLum(hex) {
+  // относительная яркость #rgb/#rrggbb; всё, что нужно — светлая тема или тёмная
+  let h = String(hex || "").replace("#", "");
+  if (h.length === 3) h = h.split("").map(c => c + c).join("");
+  if (h.length !== 6) return 0;
+  const n = parseInt(h, 16);
+  if (Number.isNaN(n)) return 0;
+  return (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
+}
+function _tgMix(hex, towardWhite, amt) {
+  // шаг поверхности: на светлой теме — затемняем, на тёмной — подсвечиваем
+  let h = String(hex || "").replace("#", "");
+  if (h.length === 3) h = h.split("").map(c => c + c).join("");
+  if (h.length !== 6) return hex;
+  const n = parseInt(h, 16);
+  const tgt = towardWhite ? 255 : 0;
+  const ch = (sh) => Math.round((((n >> sh) & 255) * (1 - amt)) + (tgt * amt));
+  return "#" + [16, 8, 0].map(sh => ch(sh).toString(16).padStart(2, "0")).join("");
+}
 function applyTgTheme(tg) {
   const tp = tg.themeParams || {};
   const root = document.documentElement.style;
-  if (tp.bg_color) root.setProperty('--bg', tp.bg_color);
-  if (tp.secondary_bg_color) root.setProperty('--surface', tp.secondary_bg_color);
-  if (tp.text_color) root.setProperty('--ink', tp.text_color);
-  if (tp.hint_color) root.setProperty('--ink-2', tp.hint_color);
-  if (tp.button_color) root.setProperty('--mint', tp.button_color);
-  if (tp.button_text_color) root.setProperty('--mint-ink', tp.button_text_color);
-  // header color for nav
-  if (tp.header_bg_color) root.setProperty('--nav-bg', tp.header_bg_color);
+  const set = (k, v) => { if (v) root.setProperty(k, v); };
+  set('--bg', tp.bg_color);
+  set('--ink', tp.text_color);
+  set('--ink-2', tp.hint_color);
+  set('--mint', tp.button_color);
+  set('--mint-ink', tp.button_text_color);
+  set('--nav-bg', tp.header_bg_color);
+  const light = _tgLum(tp.bg_color || '#0b0d12') > 0.5;
+  root.colorScheme = light ? 'light' : 'dark';   // нативные select/скроллбары
+  // --surface-2 — самая частая панельная переменная (сегменты, селекты, тосты,
+  // чипы). Раньше не маппилась: в светлой теме Telegram оставалась тёмной
+  // #171b25, и тёмный текст читался по тёмному (скриншот пользователя 29.09).
+  const surf = tp.secondary_bg_color || (light ? '#f1f2f5' : '#12151d');
+  set('--surface', tp.secondary_bg_color);
+  root.setProperty('--surface-2', _tgMix(surf, !light, 0.055));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', tp.header_bg_color || tp.bg_color || '#0b0d12');
 }
 function tgTryLogin() {
   const tg = tgWebApp();

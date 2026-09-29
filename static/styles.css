@@ -11,6 +11,8 @@
   --ink-2: #a6adc0;
   --mint: #34e2a0;
   --mint-deep: #0f8f5f;
+  --nav-bg: #0b0d12;
+  --mint-ink: #06210f;
   --amber: #ffb75e;
   --danger: #ff6b6b;
   --r-l: 16px;
@@ -49,6 +51,9 @@ body {
   display: flex; align-items: center; gap: 22px;
   padding: 14px max(24px, calc((100vw - 1120px) / 2));
   background: rgba(11, 13, 18, .82);
+  /* тема Telegram: header_bg_color через --nav-bg; старый движок теряет эту
+     строку и живёт на fallback выше */
+  background: color-mix(in srgb, var(--nav-bg) 84%, transparent);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
 .wordmark {
@@ -75,7 +80,7 @@ body {
   padding: 11px 20px; transition: transform .16s cubic-bezier(.2, .8, .3, 1), box-shadow .16s, background .16s, color .16s;
   display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none;
 }
-.btn-solid { background: var(--mint); color: #06210f; box-shadow: 0 10px 26px -10px rgba(52, 226, 160, .45); }
+.btn-solid { background: var(--mint); color: var(--mint-ink); box-shadow: 0 10px 26px -10px rgba(52, 226, 160, .45); }
 .btn-solid:hover { transform: translateY(-1px); box-shadow: 0 14px 32px -10px rgba(52, 226, 160, .6); }
 .btn-solid:active { transform: translateY(0); }
 .btn-solid:disabled { background: #232a38; color: #6b7488; box-shadow: none; cursor: not-allowed; }
@@ -665,6 +670,10 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
   #toasts { bottom: calc(78px + env(safe-area-inset-bottom)); }
   html { scroll-padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .foot { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
+  /* 4 сегмента по 92px min не влезают в 342px: flex-wrap ронял «Документ»
+     одну строку и обрезал «Транскрипцию» (скриншот 29.09). 2×2 — читаемо. */
+  .seg { display: grid; grid-template-columns: 1fr 1fr; }
+  .seg button { min-width: 0; }
   /* studio bar on mobile: wrap nicely */
   .studio-bar { padding: 0 4px; }
   .sb-right { gap: 6px; }
