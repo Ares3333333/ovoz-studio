@@ -90,8 +90,14 @@ LANGS = {"uz", "ru", "en"}
 # --- константы политики безопасности ---
 PBKDF2_ITERS = 120_000                       # OWG 2023 floor for PBKDF2-HMAC-SHA256
 SECRET_MIN_LEN = 10
-MAX_UPLOAD_BYTES = 4 * 1024 * 1024           # 4 МБ — документ/аудио на MVP
-MAX_BODY_BYTES = MAX_UPLOAD_BYTES + 512_000  # + форма
+# Форензик-аудит R37: 4 MiB был единым потолком и для текста, и для аудио —
+# product продаёт 30-минутные ленты (MAX_JOB_TIMELINE_SEC, окна 900 с, оплата
+# за минуты), а загрузить их было физически нельзя: потолок в неверной единице,
+# тихая потеря функции. Медиа получает честный 64 MiB (30 мин mp3/wav с запасом),
+# текст остаётся на 4 MiB. И тело больше НЕ читается в RAM целиком (_spool_upload).
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024           # документы/транскрипты: текст
+MAX_MEDIA_UPLOAD_BYTES = 64 * 1024 * 1024    # аудио/видео лента
+MAX_BODY_BYTES = MAX_MEDIA_UPLOAD_BYTES + 512_000  # + форма
 MAX_ACTIVE_JOBS_PER_USER = 5                 # flood-guard
 DAILY_QUOTA_MINUTES = {"free": 30, "pro": 240, "studio": 1000}  # per-plan soft ceiling
 # How far past a limit we still read a rejected body (see _drain_body).
@@ -1074,11 +1080,43 @@ def create_job(request: Request, file: UploadFile = File(...), jtype: str = Form
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > MAX_BODY_BYTES:
         raise HTTPException(413, f"Body too large (max {MAX_BODY_BYTES} bytes)")
-    data = file.file.read(MAX_UPLOAD_BYTES + 1)
-    job = _submit_job(user, data, file.filename or "", jtype, src, tgt,
+    store_path, head = _spool_upload(file)
+    job = _submit_job(user, head, file.filename or "", jtype, src, tgt,
                       diarize=_truthy(diarize), polish=_truthy(polish),
-                      align=_truthy(align), words=_truthy(words))
+                      align=_truthy(align), words=_truthy(words),
+                      store_path=store_path)
     return JSONResponse({"job": _public_job(db.get_job(job["id"]))}, status_code=201)
+
+
+def _spool_upload(file: UploadFile) -> tuple[Path, bytes]:
+    """Стрим на диск, не в RAM: потолок decided по расширению, head 4 KB нужен
+    magic-проверке. Ни один байт не живёт в процессе дольше чанка; при превышении
+    — 413 и мгновенный unlink, без осадка на диске."""
+    ext = Path(file.filename or "").suffix.lower()
+    cap = MAX_MEDIA_UPLOAD_BYTES if ext in ALLOWED_EXT_AUDIO else MAX_UPLOAD_BYTES
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    store_path = settings.uploads_dir / f"{db.new_id()}{ext or '.bin'}"
+    head = b""
+    total = 0
+    try:
+        with store_path.open("wb") as sink:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > cap:
+                    raise HTTPException(413, f"File too large (max {cap} bytes)")
+                if len(head) < 4096:
+                    head += chunk[: 4096 - len(head)]
+                sink.write(chunk)
+    except HTTPException:
+        store_path.unlink(missing_ok=True)
+        raise
+    if total == 0:
+        store_path.unlink(missing_ok=True)
+        raise HTTPException(400, "Empty file")
+    return store_path, head
 
 
 def _truthy(value) -> bool:
@@ -1089,39 +1127,56 @@ def _truthy(value) -> bool:
 def _submit_job(user: dict, data: bytes, filename: str, jtype: str,
                 src: str, tgt: str, diarize: bool = False,
                 polish: bool = False, align: bool = False,
-                words: bool = False) -> dict:
+                words: bool = False,
+                store_path: Path | None = None) -> dict:
     """Validate bytes, store, estimate, charge and dispatch one job.
     Shared by single-upload and batch-upload endpoints. Raises HTTPException
-    on any validation/budget failure. Returns the created job dict."""
+    on any validation/budget failure. Returns the created job dict.
+    store_path: файл уже на диске (стриминговый путь R37) — `data` это его
+    head-байты для magic-проверки; write полностью мимо RAM."""
     if jtype not in JOB_TYPES:
         raise HTTPException(400, f"type must be one of {sorted(JOB_TYPES)}")
     if src not in LANGS or tgt not in LANGS or src == tgt:
         raise HTTPException(400, "src/tgt must be distinct codes from uz/ru/en")
     ext = Path(filename).suffix.lower()
-    if ext not in ALLOWED_UPLOAD_EXT:
-        raise HTTPException(400, f"Unsupported file type: {ext}")
-    if db.count_active_jobs(user["id"]) >= MAX_ACTIVE_JOBS_PER_USER:
-        raise HTTPException(429, f"Too many active jobs (max {MAX_ACTIVE_JOBS_PER_USER})",
-                            headers={"Retry-After": "60",
-                                     "X-RateLimit-Limit": str(MAX_ACTIVE_JOBS_PER_USER),
-                                     "X-RateLimit-Remaining": "0"})
-    plan = user.get("plan", "free")
-    daily_cap = DAILY_QUOTA_MINUTES.get(plan, 30)
-    spent = db.minutes_spent_today(user["id"])
-    if spent >= daily_cap:
-        raise HTTPException(429, f"Daily quota reached ({daily_cap} min). Try tomorrow or upgrade.",
-                            headers={"Retry-After": "3600",
-                                     "X-RateLimit-Limit": str(daily_cap),
-                                     "X-RateLimit-Remaining": "0"})
+    try:
+        if ext not in ALLOWED_UPLOAD_EXT:
+            raise HTTPException(400, f"Unsupported file type: {ext}")
+        if db.count_active_jobs(user["id"]) >= MAX_ACTIVE_JOBS_PER_USER:
+            raise HTTPException(429, f"Too many active jobs (max {MAX_ACTIVE_JOBS_PER_USER})",
+                                headers={"Retry-After": "60",
+                                         "X-RateLimit-Limit": str(MAX_ACTIVE_JOBS_PER_USER),
+                                         "X-RateLimit-Remaining": "0"})
+        plan = user.get("plan", "free")
+        daily_cap = DAILY_QUOTA_MINUTES.get(plan, 30)
+        spent = db.minutes_spent_today(user["id"])
+        if spent >= daily_cap:
+            raise HTTPException(429, f"Daily quota reached ({daily_cap} min). Try tomorrow or upgrade.",
+                                headers={"Retry-After": "3600",
+                                         "X-RateLimit-Limit": str(daily_cap),
+                                         "X-RateLimit-Remaining": "0"})
+    except HTTPException:
+        # спул уже на диске: отказ по валидации/квоте не должен оставлять сироту
+        if store_path is not None:
+            store_path.unlink(missing_ok=True)
+        raise
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     upload_key = db.new_id()
-    store_path = settings.uploads_dir / f"{upload_key}{ext}"
+    if store_path is None:
+        store_path = settings.uploads_dir / f"{upload_key}{ext}"
     try:
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES} bytes)")
-        if ext in ALLOWED_EXT_AUDIO and not _validate_magic(data, ext):
-            raise HTTPException(400, "File content does not match its extension")
-        store_path.write_bytes(data)
+        if store_path == settings.uploads_dir / f"{upload_key}{ext}":
+            # legacy bytes-path (batch/ling): потолок по категории расширения
+            cap = MAX_MEDIA_UPLOAD_BYTES if ext in ALLOWED_EXT_AUDIO else MAX_UPLOAD_BYTES
+            if len(data) > cap:
+                raise HTTPException(413, f"File too large (max {cap} bytes)")
+            if ext in ALLOWED_EXT_AUDIO and not _validate_magic(data, ext):
+                raise HTTPException(400, "File content does not match its extension")
+            store_path.write_bytes(data)
+        else:
+            # стрим уже на диске: magic по head, размер проверен при стриме
+            if ext in ALLOWED_EXT_AUDIO and not _validate_magic(data, ext):
+                raise HTTPException(400, "File content does not match its extension")
     except HTTPException:
         store_path.unlink(missing_ok=True)
         raise
@@ -1148,7 +1203,10 @@ def _submit_job(user: dict, data: bytes, filename: str, jtype: str,
     jid = job["id"]
     if not billing.charge_for_job(job):
         db.delete_job(jid, unlink_files=True)
-        raise HTTPException(402, f"Insufficient credits: need {minutes} min")
+        # цифры в отказе: «не хватило» без «на сколько» вынуждает пользователя
+        # гадать, а приложение обязано сказать правду сразу
+        have = round(billing.balance(user["id"]), 1)
+        raise HTTPException(402, f"Not enough minutes: need {minutes}, you have {have}")
     remaining = billing.balance(user["id"])
     maybe_notify_balance_low(user["id"], remaining)
     db.add_job_event(jid, "queued", f"minutes={minutes}")
@@ -1193,10 +1251,11 @@ def create_jobs_batch(
     created = 0
     for f in files:
         try:
-            data = f.file.read(MAX_UPLOAD_BYTES + 1)
-            job = _submit_job(user, data, f.filename or "", jtype, src, tgt,
+            sp, head = _spool_upload(f)   # batch тоже стримом: 10×64MB в RAM — смерть
+            job = _submit_job(user, head, f.filename or "", jtype, src, tgt,
                               diarize=_truthy(diarize), polish=_truthy(polish),
-                              align=_truthy(align), words=_truthy(words))
+                              align=_truthy(align), words=_truthy(words),
+                              store_path=sp)
             results.append({"filename": f.filename, "ok": True,
                             "job": _public_job(db.get_job(job["id"]))})
             created += 1

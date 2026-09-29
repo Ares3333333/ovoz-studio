@@ -7,7 +7,10 @@ COPY requirements.txt .
 # wheel-таргет — быстрее старт и меньше слоёв; --require-hashes включи,
 # когда сгенерируешь `pip-compile --generate-hashes`
 RUN pip wheel --no-deps -w /wheels -r requirements.txt \
- && pip wheel -w /wheels uvicorn[standard] fastapi python-multipart httpx
+ && pip wheel -w /wheels uvicorn[standard] fastapi python-multipart httpx edge-tts
+# edge-tts в перечислении ВТОРОГО прохода обязателен: первый — --no-deps (пинты),
+# а зависимости edge-tts (aiohttp/tabulate) иначе не попадают в /wheels и офлайн-
+# установка падает. Ломающийся без этого Docker-сборкой деплой пойман cgroup-тестом R37.
 
 FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 \

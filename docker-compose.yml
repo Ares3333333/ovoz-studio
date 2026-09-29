@@ -17,6 +17,14 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OVOZ_ASR_PROVIDER: ${OVOZ_ASR_PROVIDER:-sim}
+      # faster-whisper живёт без ключа и без сети (модель кэшируется на томе /data):
+      OVOZ_ASR_MODEL: ${OVOZ_ASR_MODEL:-}
+      OVOZ_ASR_COMPUTE: ${OVOZ_ASR_COMPUTE:-int8}
+      # бюджеты тяжёлых стадий (замер R37: один long-form dub = peak 1.07 GB):
+      # для 2 GB контейнера слоты по 1; поднимать только зная размер box
+      OVOZ_ASR_SLOTS: ${OVOZ_ASR_SLOTS:-1}
+      OVOZ_DUB_SLOTS: ${OVOZ_DUB_SLOTS:-1}
+      OVOZ_ASR_THREADS: ${OVOZ_ASR_THREADS:-2}
       OVOZ_TRANSLATE_PROVIDER: ${OVOZ_TRANSLATE_PROVIDER:-sim}
       OVOZ_TTS_PROVIDER: ${OVOZ_TTS_PROVIDER:-sim}
       OVOZ_WHISPER_BIN: ${OVOZ_WHISPER_BIN:-}
@@ -24,15 +32,22 @@ services:
       OVOZ_FFPROBE_BIN: ${OVOZ_FFPROBE_BIN:-ffprobe}
       OVOZ_SIGNUP_BONUS_MINUTES: ${OVOZ_SIGNUP_BONUS_MINUTES:-10}
       OVOZ_RETENTION_DAYS: ${OVOZ_RETENTION_DAYS:-7}
+      # витрина/тренеры: демо-начисление включается ЯВНО (прод по умолчанию выключен)
       OVOZ_ALLOW_DEMO_CREDIT: ${OVOZ_ALLOW_DEMO_CREDIT:-0}
       OVOZ_TRUSTED_PROXIES: ${OVOZ_TRUSTED_PROXIES:-}
     volumes:
       - ovoz-data:/data
     restart: unless-stopped
+    # wall-clock job'а — 600 с; docker убивает контейнер SIGKILL через 10 с,
+    # что гарантированно рвало бы платные задачи при каждом деполе и расширяло
+    # окно двойного recovery. Drain до 11 минут — честная цена graceful shutdown.
+    stop_grace_period: 11m
     init: true                       # PID-1 reaping для ffprobe-дочерних
     read_only: true                  # корень только-чтение; пишет в /data и /tmp
     tmpfs:
-      - /tmp:size=64m                # python-multipart споллит большие тела сюда
+      # R37: медиа-потолок 64 MiB × батч из 10 файлов спилится multipart'ом сюда;
+      # прежние 64m лопнули бы на третьем файле
+      - /tmp:size=256m              # python-multipart споллит большие тела сюда
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -41,7 +56,10 @@ services:
     # SQLite WAL + фоновые воркеры в потоках => один реплика на том же томе.
     # Масштабирование реплик — после выноса очереди jobs во внешний брокер.
     cpus: 2
-    mem_limit: 1g
+    # R37 измерение: пик одного long-form dubbing = 1.07 GB (модель ASR + decode
+    # окно), 1g убивал OOM. 2g — минимальная честная конфигурация с OVOZ_*_SLOTS=1.
+    # Тяжёлый API без реальных провайдеров живёт и в 512m (idle 90 MB).
+    mem_limit: 2g
     logging:
       driver: json-file
       options:

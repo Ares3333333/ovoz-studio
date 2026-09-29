@@ -406,3 +406,61 @@ def test_faster_load_failure_does_not_leak_the_cache_path(monkeypatch):
 
 class _BoomModule:
     def __init__(self, loader): self.WhisperModel = loader
+
+
+class _BudgetModule:
+    """Fake faster_whisper capturing the constructor kwargs the real CTranslate2
+    receives — the cpu_threads budget is only honored if we pass it."""
+    def __init__(self, model_cls): self.WhisperModel = model_cls
+
+
+def test_faster_builds_the_model_with_a_cpu_thread_budget(tmp_path, monkeypatch):
+    """R37, measured on this machine: two parallel ASR jobs with CTranslate2's
+    default all-cores decoder starved uvicorn so a client never got its 201.
+    The model must be constructed with an explicit thread ceiling."""
+    from app import config as cfg
+    calls = {}
+
+    class _M:
+        def __init__(self, size, device=None, compute_type=None, cpu_threads=None):
+            calls["cpu_threads"] = cpu_threads
+
+        def transcribe(self, path, language=None, beam_size=5):
+            return [], None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", _BudgetModule(_M))
+    monkeypatch.setattr(cfg.settings, "asr_threads", 2, raising=False)
+    prov = A.FasterWhisperASR("base")
+    prov.transcribe(tmp_path / "take.wav", "uz")
+    assert calls["cpu_threads"] == 2, "CTranslate2 must not default to all cores"
+
+
+def test_concurrent_decoders_never_exceed_the_slot_budget(tmp_path, monkeypatch):
+    """Six jobs, two slots: the decoder concurrency a 1 GB / 2-core container can
+    actually absorb. More coexisting decoders is the queue-stall we just hit."""
+    import threading as th
+    live = {"n": 0, "max": 0}
+    lock = th.Lock()
+
+    class _M:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, path, language=None, beam_size=5):
+            with lock:
+                live["n"] += 1
+                live["max"] = max(live["max"], live["n"])
+            th.Event().wait(0.05)
+            with lock:
+                live["n"] -= 1
+            return [], None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", _BudgetModule(_M))
+    prov = A.FasterWhisperASR("base")
+    threads = [th.Thread(target=lambda: prov.transcribe(tmp_path / f"t{i}.wav", "uz"))
+               for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert live["max"] <= 2, f"{live['max']} decoders ran at once — slots not enforced"

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
+import threading
 import time
 import wave
 from array import array
@@ -43,6 +45,15 @@ JOB_TIMEOUT_SEC = 600  # 10 min per job max
 MAX_JOB_TAPE_SEC = 3600.0      # потолок слушания одного job'а
 LISTEN_BLOCK_SEC = 60.0        # сколько ленты держим в руках одновременно
 LISTEN_READ_TIMEOUT_SEC = 60.0 # блок из ffmpeg приходит за миллисекунды
+# Аудит-роя (Round 35): cap_sec производный от span — для 30-минутной ленты это
+# 161MB bytearray + копия bytes() на запись = ~330MB на job; восемь таких
+# даббингов убивают контейнер в 1GB до того, как run_job успеет что-либо
+# поймать (OOM-kill не является исключением). Абсолютный потолок буфера — 15
+# минут звука (66MB), и не более двух микшеров одновременно: третий ждёт
+# слота, следя за дедлайном, а не распихивая контейнер по OOM.
+MAX_DUB_OUTPUT_SEC = 900.0
+DUB_MIXER_SLOTS = int(os.environ.get("OVOZ_DUB_SLOTS", "2"))
+_DUB_SEM = threading.BoundedSemaphore(DUB_MIXER_SLOTS)
 DIAR_PCM_RATE = 8000         # mono 8 kHz s16le — достаточно для голоса/тембра
 DIAR_STRIDE = 2              # берём каждый 2-й отсчёт (эффективные 4 kHz)
 DIAR_MAX_SAMPLES = 4000      # отсчётов в ОДНОМ окне профиля (после декадации) ≈ 1 с
@@ -799,9 +810,28 @@ def _execute(job: dict, deadline: float = 0) -> None:
         voiced = {sp for sp in (speakers or []) if sp}
         if len(voiced) > 2:
             db.add_job_event(jid, "tts",
-                             f"casting: {len(voiced)} speakers share 2 voices (cycled)")
-        rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers,
-                           deadline=deadline)
+                             f"casting: {len(voiced)} speakers over 10 voice slots (cycled)")
+        # Слоты микшера — не очередь желания: ждём не бесконечно, а с оглядкой
+        # на дедлайн, чтобы ожидающий job не пережил оплаченную стену часов.
+        got_slot = False
+        while not got_slot:
+            got_slot = _DUB_SEM.acquire(timeout=2.0)
+            if not got_slot:
+                _check_deadline()
+        try:
+            rep = _mix_dubbing(jid, translated, tts, tgt, art, speakers=speakers,
+                               deadline=deadline)
+        finally:
+            if got_slot:
+                _DUB_SEM.release()
+        pf = getattr(tts, "_persona_failures", 0)
+        if pf:
+            # Персона не состоялась (нет ffmpeg) — строка звучит подлинным голосом.
+            # это деградация, о которой клиент имеет право узнать, а не тайна.
+            db.add_job_event(jid, "tts", f"persona fallback: {pf} lines use the raw voice")
+        if rep.get("tts_retries"):
+            db.add_job_event(jid, "tts",
+                             f"tts retries: {rep['tts_retries']} transient refusals rode out")
         # Голос длиннее окна — это не баг, который надо спрятать: клиент имеет право
         # знать, что даббинг разошёлся с таймкодами, а не получить «готово» и тихую
         # нарезку. Числа финитные; путь файла наружу не идёт.
@@ -844,6 +874,8 @@ def _dub_schedule(segments: list[Segment], actuals: list[float],
 def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
                  speakers: list[int] | None = None, deadline: float = 0) -> dict:
     rate = 22050
+    # ... (см. MAX_DUB_OUTPUT_SEC): cap — не только производный от ленты, но и
+    # абсолютный: память микшера определяет контейнер, а не фантазия клиента.
     # Два прохода, но НЕ удержанием всех голосов в памяти: первый проход измеряет
     # реальную длительность каждой реплики и оставляет PCM на диске (по одному
     # файлу на реплику), второй — перечитывает и подмешивает по одному файлу. Пик памяти —
@@ -854,6 +886,7 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
     # переживать оплаченное окно молча; TimeoutError уходит в run_job → failed + refund.
     tmps: list[Path] = []
     actuals: list[float] = []
+    retries = 0
     try:
         for idx, s in enumerate(translated):
             if deadline and time.monotonic() > deadline:
@@ -862,7 +895,21 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
             # speaker>0 chooses an alternate voice for this diarized speaker; 0/None
             # keeps the single primary voice (stub and non-diarized jobs unchanged).
             spk = speakers[idx] if speakers else 0
-            tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start, speaker=spk)
+            # R37 live finding: edge-tts transiently answers "No audio was received"
+            # under burst load, and one such line used to annihilate the whole paid
+            # long-form dub. Two bounded retries with backoff (deadline-aware) ride
+            # out the hiccup; a line that still refuses fails honestly.
+            for attempt in range(3):
+                try:
+                    tts.synthesize(s.text, tgt, tmp, dur_sec=s.end - s.start, speaker=spk)
+                    break
+                except Exception as syn_exc:
+                    if attempt == 2 or "no audio" not in str(syn_exc).lower():
+                        raise
+                    retries += 1
+                    time.sleep(1.5 * (attempt + 1))
+                    if deadline and time.monotonic() > deadline:
+                        raise TimeoutError(f"job exceeded {JOB_TIMEOUT_SEC}s")
             _ensure_wav(tmp)  # now guarantees 22050 mono 16-bit PCM
             with wave.open(str(tmp), "rb") as w:
                 sr = w.getframerate() or rate
@@ -872,7 +919,7 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
         span = max((s.end for s in translated), default=1.0)
         # Потолок памяти: даб может раздвинуться, но не безобразно. Вдвое длиннее
         # оплаченной ленты + запас — это всё, что микшер выделит.
-        cap_sec = span * 2.0 + TIMELINE_SLACK_SEC
+        cap_sec = min(span * 2.0 + TIMELINE_SLACK_SEC, MAX_DUB_OUTPUT_SEC)
         starts, total, clipped = _dub_schedule(translated, actuals, cap_sec)
         samples = bytearray(int(total * rate) * 2)  # 16-bit mono
         for start, tmp in zip(starts, tmps):
@@ -900,11 +947,12 @@ def _mix_dubbing(jid: str, translated: list[Segment], tts, tgt: str, art: Path,
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
-        w.writeframes(bytes(samples))
+        w.writeframes(samples)  # bytearray уходит по buffer-протоколу: без второй копии
     db.add_artifact(jid, "dubbing", str(out))
     # Честный отчёт: сколько голосов пришлось сдвинуть, и был ли обрезан хвост.
     shifted = sum(1 for s, st in zip(translated, starts) if st > s.start + 1e-6)
     drift = max((st + d - s.end for s, st, d in zip(translated, starts, actuals)),
                 default=0.0)
     return {"lines": len(translated), "shifted": shifted, "clipped": clipped,
-            "drift_sec": round(drift, 3), "total_sec": round(total, 3)}
+            "drift_sec": round(drift, 3), "total_sec": round(total, 3),
+            "tts_retries": retries}

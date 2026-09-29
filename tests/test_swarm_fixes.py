@@ -220,3 +220,79 @@ def test_webhook_registration_refuses_internal_targets(client, auth):
                     data={"url": "https://169.254.169.254/hook", "events": "job.done"})
     assert r.status_code == 422
     assert "private" in r.json()["detail"].lower() or "refused" in r.json()["detail"].lower()
+
+
+def test_mixer_buffer_has_an_absolute_ceiling_not_just_a_derived_one(client, auth,
+                                                                      tmp_path):
+    """Audit R35: cap was span*2+slack — a 30-min paid tape allocated ~161MB and
+    the write copy doubled it; eight concurrent dubbings OOM-killed the 1GB
+    container and no exception handler can survive that. The buffer is now
+    capped absolutely (15 min of audio) no matter what the timeline claims."""
+    import wave
+    from app import db, pipeline
+    from app.providers.base import Segment
+
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    job = db.create_job(uid, "dubbing", "uz", "ru", 30.0, "x.wav", {})
+    art = tmp_path
+
+    class _TinyTTS:
+        name = "tiny"
+
+        def synthesize(self, text, lang, out_path, dur_sec=0, speaker=0):
+            with wave.open(str(out_path), "w") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(22050)
+                w.writeframes(b"\x00\x00" * 2205)   # 0.1 s of silence
+
+    segs = [Segment(start=0.0, end=1800.0, text="ochak long tape tail")]
+    rep = pipeline._mix_dubbing(job["id"], segs, _TinyTTS(), "ru", art)
+    assert rep["total_sec"] <= pipeline.MAX_DUB_OUTPUT_SEC + 0.01, rep
+    assert rep["clipped"] is True, "an over-cap timeline must be admitted, not hidden"
+    # the artifact is real and finite, the buffer never exceeded the absolute cap
+    assert (art / "dubbing.wav").stat().st_size <= int(pipeline.MAX_DUB_OUTPUT_SEC * 22050 * 2) + 100
+
+
+def test_transient_tts_refusal_is_retried_not_fatal(client, auth, tmp_path, monkeypatch):
+    """R37 live finding: edge-tts answered 'No audio was received' once under load
+    and the whole paid 15-minute dub died with it. A transient refusal costs two
+    bounded retries; a real refusal still fails honestly (covered by the negative
+    assertion below)."""
+    import time
+    import wave
+    from app import db, pipeline
+    from app.providers.base import Segment
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)  # no real backoff in tests
+    uid = client.get("/api/me", headers=auth).json()["user"]["id"]
+    job = db.create_job(uid, "dubbing", "uz", "ru", 2.0, "x.wav", {})
+
+    class _FlakyTTS:
+        name = "flaky"
+
+        def __init__(self):
+            self.calls = 0
+
+        def synthesize(self, text, lang, out_path, dur_sec=0, speaker=0):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("No audio was received. Check params.")
+            with wave.open(str(out_path), "w") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
+                w.writeframes(b"\x00\x00" * 2205)
+
+    segs = [Segment(start=0.0, end=1.0, text="salom")]
+    tts = _FlakyTTS()
+    rep = pipeline._mix_dubbing(job["id"], segs, tts, "ru", tmp_path)
+    assert tts.calls == 2, "the transient refusal must be retried, not feared"
+    assert rep["tts_retries"] == 1
+
+    class _PoisonTTS:
+        name = "poison"
+
+        def synthesize(self, *a, **k):
+            raise RuntimeError("database is locked")  # not a transient tts refusal
+
+    with pytest.raises(RuntimeError):
+        pipeline._mix_dubbing(job["id"], segs, _PoisonTTS(), "ru", tmp_path)

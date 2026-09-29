@@ -36,6 +36,10 @@ class Settings:
     # asr_provider == "faster"; an empty value means "not configured for faster".
     asr_model: str = field(default_factory=lambda: _env("OVOZ_ASR_MODEL"))
     asr_compute: str = field(default_factory=lambda: _env("OVOZ_ASR_COMPUTE", "int8"))
+    # ядер на ДЕКОДЕР, не на процесс: CTranslate2 по умолчанию берёт все ядра,
+    # и два параллельных ASR вешают box (замерено R37). 2 — потолок худшего
+    # случая на cpus:2 контейнере; raise только осознанно, зная бюджет.
+    asr_threads: int = field(default_factory=lambda: int(_env("OVOZ_ASR_THREADS", "2")))
 
     translate_provider: str = field(default_factory=lambda: _env("OVOZ_TRANSLATE_PROVIDER", "sim"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))

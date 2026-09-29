@@ -55,3 +55,6 @@ _patch_toast.py
 _audit_state.txt
 _fix_indent.py
 _bump*.py
+_jobs_check.py
+_drain_wait.py
+_verify37.txt

@@ -195,7 +195,8 @@ class FasterWhisperASR:
                     try:
                         from faster_whisper import WhisperModel
                         self._model = WhisperModel(self.model_size, device=self.device,
-                                                   compute_type=self.compute)
+                                                   compute_type=self.compute,
+                                                   cpu_threads=settings.asr_threads)
                     except Exception as exc:  # noqa: BLE001
                         # The raw CTranslate2/HF error embeds the cache path and model
                         # id (operator topology). Normalize to a variable-name sentence
@@ -214,21 +215,32 @@ class FasterWhisperASR:
         if p.suffix.lower() in TEXT_SUFFIXES or p.with_suffix(".txt").exists():
             return SimASR()._from_text(p)
         model = self._load()
-        segments, _info = model.transcribe(str(audio_path),
-                                           language=lang or None, beam_size=5)
-        out: list[Segment] = []
-        for s in segments:
-            text = str(getattr(s, "text", "")).strip()
-            if text:
-                out.append(Segment(round(float(s.start), 3),
-                                   round(float(s.end), 3), text))
-        return out
+        # Декодер CTranslate2 по умолчанию берёт ВСЕ ядра: два параллельных ASR
+        # на 2-ядерном контейнере (или на этой машине — замерено в живую в R37:
+        # два job'а) раздувают очередь так, что веб-воркер не досылает ответ
+        # клиенту. Slots=2 — потолок одновременного декода, cpu_threads — потолок
+        # на декодер. Худший случай становится плановым, а не случайным.
+        with _TRANSCRIBE_SEM:
+            segments, _info = model.transcribe(str(audio_path),
+                                               language=lang or None, beam_size=5)
+            out: list[Segment] = []
+            for s in segments:
+                text = str(getattr(s, "text", "")).strip()
+                if text:
+                    out.append(Segment(round(float(s.start), 3),
+                                       round(float(s.end), 3), text))
+            return out
 
 
 # One loaded model per (size, compute, device): the weights are big and slow to
 # load, and a worker process runs many jobs, so the instance is cached deliberately.
 _FASTER_SINGLETON: dict[tuple, FasterWhisperASR] = {}
 _FASTER_LOCK = threading.Lock()
+# Потолок одновременного декода (R37): сверх него job'ы ждут в слоте, а не
+# раздувают латентность друг друга на всех ядрах. Замер R37: два параллельных
+# long-form job = 1322 MB peak в 1GB-контейнере -> для такого лимита слотов 1.
+ASR_TRANSCRIBE_SLOTS = int(os.environ.get("OVOZ_ASR_SLOTS", "2"))
+_TRANSCRIBE_SEM = threading.BoundedSemaphore(ASR_TRANSCRIBE_SLOTS)
 
 
 def _package_present(name: str) -> bool:
