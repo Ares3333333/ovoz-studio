@@ -83,7 +83,7 @@ body {
 .btn-solid { background: var(--mint); color: var(--mint-ink); box-shadow: 0 10px 26px -10px rgba(52, 226, 160, .45); }
 .btn-solid:hover { transform: translateY(-1px); box-shadow: 0 14px 32px -10px rgba(52, 226, 160, .6); }
 .btn-solid:active { transform: translateY(0); }
-.btn-solid:disabled { background: #232a38; color: #6b7488; box-shadow: none; cursor: not-allowed; }
+.btn-solid:disabled { background: var(--surface-2); color: var(--ink-2); box-shadow: none; cursor: not-allowed; }
 .btn-quiet { background: transparent; color: var(--ink-2); }
 .btn-quiet:hover { color: var(--ink); background: var(--surface-2); }
 .btn-lg { padding: 15px 30px; font-size: 16.5px; border-radius: 14px; }
@@ -129,7 +129,9 @@ body {
 .steps li:hover { transform: translateY(-2px); transition: transform .25s cubic-bezier(.2, .8, .3, 1); }
 .step-n {
   display: inline-flex; width: 30px; height: 30px; border-radius: 50%;
-  background: rgba(52, 226, 160, .14); color: var(--mint);
+  /* сплошная мята + чернила темы: был mint-on-mint-14% (1.54:1 в светлой теме —
+     QA 29.09), теперь 10.17:1 в обеих */
+  background: var(--mint); color: var(--mint-ink);
   font-weight: 700; font-size: 14px; align-items: center; justify-content: center; margin-bottom: 14px;
 }
 .steps h3 { margin: 0 0 8px; font-size: 16.5px; letter-spacing: -0.02em; }
@@ -325,7 +327,7 @@ body {
 .cap-mock {
   margin-top: auto; padding-top: 26px;
 }
-.mock-line { height: 10px; border-radius: 5px; background: #232a38; margin-bottom: 10px; }
+.mock-line { height: 10px; border-radius: 5px; background: var(--surface-2); margin-bottom: 10px; }
 .w90 { width: 90%; } .w70 { width: 70%; }
 .mock-bars { display: flex; align-items: flex-end; gap: 5px; height: 56px; margin-top: 18px; }
 .mock-bars i {
@@ -488,7 +490,7 @@ input:focus, textarea:focus { border-color: var(--mint); outline: 0; }
   animation: pulse 1.3s ease-in-out infinite alternate; }
 .skel-sm { height: 36px; width: 55%; border-radius: 8px; }
 .skel-lg { height: 110px; }
-.skel-line { height: 12px; border-radius: 6px; background: #232a38; margin-bottom: 8px; }
+.skel-line { height: 12px; border-radius: 6px; background: var(--surface-2); margin-bottom: 8px; }
 .skel-line.w80 { width: 80%; } .skel-line.w50 { width: 50%; }
 .pay-methods { display: flex; gap: 10px; margin-top: 12px; }
 .pay-methods .btn { flex: 1; opacity: .6; }

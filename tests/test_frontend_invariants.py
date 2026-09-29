@@ -1357,3 +1357,13 @@ def test_hint_color_is_clamped_to_a_readable_contrast():
     assert "_tgContrast(hint, bg) < 4.5" in body
     assert "_tgMix(hint" in body
     assert "_tgLum(tp.text_color) > _tgLum(hint)" in body, "must mix toward the text color, not away"
+
+
+def test_no_decorative_islands_survive_the_theme():
+    """Final sweep leftovers: .step-n painted mint-on-mint-alpha (1.54:1), and
+    .mock-line hardcoded #232a38 — a dark chip in a light page. Both must ride
+    on theme variables now."""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    step = css[css.index(".step-n {"):css.index(".step-n {") + 300]
+    assert "background: var(--mint)" in step and "color: var(--mint-ink)" in step
+    assert "#232a38" not in css, "a hardcoded dark island is back"
