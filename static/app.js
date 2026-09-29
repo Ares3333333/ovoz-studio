@@ -221,16 +221,20 @@ function showStudio() {
   // the Telegram autologin a few hundred ms later — and the second pass refetched
   // me/jobs/glossary/notifications because the first pass had already resolved.
   const entering = $("#studio").classList.contains("hidden");
-  $$(".hero, .how, .ling-demo, .caps, .pricing, .foot, .nav-links").forEach(el => el.classList.add("hidden"));
+  // демо-секции витрины (.turn-demo … .nafis-demo) прячутся вместе с лендингом:
+  // публичный QA поймал — студия открывалась на 3200px НИЖЕ живого демо, и
+  // нажатие «открыть студию» выглядело как ничего не происходящее.
+  $$(".hero, .how, .ling-demo, .turn-demo, .qator-demo, .jimlik-demo, .soz-demo, .nafis-demo, .caps, .pricing, .foot, .nav-links").forEach(el => el.classList.add("hidden"));
   $("#studio").classList.remove("hidden");
   $("#btn-open-studio").classList.add("hidden");
+  window.scrollTo(0, 0);   // и для deep-link /#studio, и для кнопки: студию видно сразу
   if (!token) $("#auth-card").classList.remove("hidden");
   history.replaceState(null, "", "#studio");
   tgSyncBack();
   if (entering) refreshAll();
 }
 function showLanding() {
-  $$(".hero, .how, .ling-demo, .caps, .pricing, .foot").forEach(el => el.classList.remove("hidden"));
+  $$(".hero, .how, .ling-demo, .turn-demo, .qator-demo, .jimlik-demo, .soz-demo, .nafis-demo, .caps, .pricing, .foot").forEach(el => el.classList.remove("hidden"));
   $(".nav-links").classList.remove("hidden");
   $("#studio").classList.add("hidden");
   $("#btn-open-studio").classList.remove("hidden");

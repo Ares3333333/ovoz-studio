@@ -345,8 +345,9 @@ const I18N = {
   },
 };
 
-let currentLang = localStorage.getItem("ovoz_lang")
-  || (navigator.language || "uz").slice(0, 2).replace(/[^a-z]/g, "") || "uz";
+// UZ-first продукт: без сохранённого выбора показываем узбекский, а не язык
+// браузера (иначе первый посетитель из EN-среды приземляется не на тот рынок).
+let currentLang = localStorage.getItem("ovoz_lang") || "uz";
 if (!I18N[currentLang]) currentLang = "uz";
 
 function applyI18n() {

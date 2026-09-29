@@ -1272,3 +1272,32 @@ def test_live_events_coalesce_into_one_jobs_refresh():
     inner = _fn_body("_fetchJobs")
     for needed in ("renderJobs(", "renderLoadMore()", "startPolling()"):
         assert needed in inner, f"the real job-list work lost {needed}"
+
+
+def test_the_public_qa_studio_scroll_bug_stays_fixed():
+    """29.09.2026 public browser QA over the real tunnel: pressing «open studio»
+    left ~3200px of live-demo sections on screen — the hide-list predated the
+    demos and nothing reset the scroll. Both navigation functions must now name
+    the same section set, and entering the studio starts at the top."""
+    ss = _code(_fn_body("showStudio"))
+    sl = _fn_body("showLanding")
+    for cls in ("turn-demo", "qator-demo", "jimlik-demo", "soz-demo", "nafis-demo"):
+        assert cls in ss, f"showStudio leaves .{cls} stacked above the studio"
+        assert cls in sl, f"showLanding never gives .{cls} back"
+    assert "window.scrollTo(0, 0);" in ss, "the studio opens out of view again"
+
+
+def test_the_header_wraps_instead_of_overflowing_on_phones():
+    """QA measured the header's min-content at ~400px against a 390px viewport
+    (brand + lang switch + 44px CTA). Without wrap the landing gains a horizontal
+    scrollbar — the one layout sin the mobile rules had sworn off since Round 17."""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    start = css.index("@media (max-width: 680px)")
+    mobile = css[start:start + 3000]   # the block itself, comments included
+    assert "flex-wrap: wrap" in mobile, ".nav must wrap at phone width"
+
+
+def test_uz_is_the_default_language_for_a_fresh_visitor():
+    """UZ-first product: an EN-browser visitor landing on EN is landing on the
+    wrong market. Language still sticks after a manual switch."""
+    assert 'localStorage.getItem("ovoz_lang") || "uz"' in I18N

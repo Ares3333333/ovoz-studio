@@ -640,6 +640,9 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
      containing block для fixed-потомков, из-за чего таб-бар «прилипал»
      к верху вместо низа */
   .nav { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  /* min-content шапки (brand+lang+CTA ≥ 400px) не влезает в 390px: wrap
+     вместо горизонтального скролла (публичный QA, 390×844) */
+  .nav { flex-wrap: wrap; row-gap: 6px; }
   /* нативный нижний таб-бар (iOS) вместо скрытия разделов */
   .nav-links {
     display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 25;
