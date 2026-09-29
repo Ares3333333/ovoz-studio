@@ -1,0 +1,24 @@
+# Продакшн-оверрайд для Oracle Always Free VM (ARM, 24 GB).
+# Использование: docker compose -f docker-compose.yml -f deploy/oracle/docker-compose.prod.yml up -d --build
+# (setup.sh делает это за тебя)
+services:
+  ovoz:
+    build:
+      args:
+        # реальный офлайн-ASR внутри образа: faster-whisper + ctranslate2
+        OVOZ_EXTRA: asr
+    environment:
+      # на боевой машине ASR/TTS — настоящие; перевод — sim, пока не дан ключ вендора
+      OVOZ_ASR_PROVIDER: ${OVOZ_ASR_PROVIDER:-faster}
+      OVOZ_ASR_MODEL: ${OVOZ_ASR_MODEL:-small}
+      OVOZ_ASR_COMPUTE: ${OVOZ_ASR_COMPUTE:-int8}
+      OVOZ_TTS_PROVIDER: ${OVOZ_TTS_PROVIDER:-edge}
+      # 24 GB Oracle: тяжёлых слотов можно 2 (замер: 1 job = ~1.07 GB пика)
+      OVOZ_ASR_SLOTS: ${OVOZ_ASR_SLOTS:-2}
+      OVOZ_DUB_SLOTS: ${OVOZ_DUB_SLOTS:-2}
+      OVOZ_ASR_THREADS: ${OVOZ_ASR_THREADS:-4}
+      OVOZ_ENV: ${OVOZ_ENV:-production}
+    #HF-кэш faster-whisper живёт на томе /data (HOME=/data в образе) — модель
+    # скачивается один раз на первом cold-start и дальше работает офлайн.
+    mem_limit: 4g
+    cpus: 4

@@ -29,6 +29,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \
  && rm -rf /wheels
 
+# опциональный доп-контур (R37): OVOZ_EXTRA=asr ставит faster-whisper ПОСЛЕ
+# офлайн-ядра, уже по сети — ядро и CI от тяжёлых wheels свободны, а
+деплоер на 24GB-машине получает реальный офлайн-ASR в самом образе
+ARG OVOZ_EXTRA=""
+RUN if [ -n "$OVOZ_EXTRA" ]; then pip install --no-cache-dir -r requirements-${OVOZ_EXTRA}.txt; fi
+
 # код принадлежит root и только для чтения, пишет только в /data
 COPY --chown=root:root app ./app
 COPY --chown=root:root static ./static
