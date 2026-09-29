@@ -1,2 +1,0 @@
-﻿1780e4aab33f7aa0b4e57cfdfcdade14fac24f14	refs/heads/main
-1780e4aab33f7aa0b4e57cfdfcdade14fac24f14	refs/heads/master

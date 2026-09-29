@@ -58,3 +58,4 @@ _bump*.py
 _jobs_check.py
 _drain_wait.py
 _verify37.txt
+_*.txt
