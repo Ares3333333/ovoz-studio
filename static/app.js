@@ -1029,17 +1029,33 @@ function _tgMix(hex, towardWhite, amt) {
   const ch = (sh) => Math.round((((n >> sh) & 255) * (1 - amt)) + (tgt * amt));
   return "#" + [16, 8, 0].map(sh => ch(sh).toString(16).padStart(2, "0")).join("");
 }
+function _tgContrast(a, b) {
+  const la = _tgLum(a), lb = _tgLum(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
 function applyTgTheme(tg) {
   const tp = tg.themeParams || {};
   const root = document.documentElement.style;
   const set = (k, v) => { if (v) root.setProperty(k, v); };
+  const light = _tgLum(tp.bg_color || '#0b0d12') > 0.5;
+  const bg = tp.bg_color || (light ? '#ffffff' : '#0b0d12');
+  // hint_color — цвет подсказок, но приложение красит им и читаемый текст
+  // (ссылки навигации, пилюли фильтра, .dim-абзацы). Telegram шлёт #8e8e93 —
+  // на белом фоне это 3.26:1, ниже порога 4.5:1 (замер QA 29.09: 13 элементов).
+  // Нечитаемую подсказку сдвигаем к цвету текста шаг за шагом, пока контраст
+  // не станет законным; в тёмной теме #a6adc0 проходила сразу — не трогаем.
+  let hint = tp.hint_color || '';
+  if (hint && tp.text_color && _tgLum(hint) !== _tgLum(tp.text_color)) {
+    for (let i = 0; i < 24 && _tgContrast(hint, bg) < 4.5; i++) {
+      hint = _tgMix(hint, _tgLum(tp.text_color) > _tgLum(hint), 0.08);
+    }
+  }
   set('--bg', tp.bg_color);
   set('--ink', tp.text_color);
-  set('--ink-2', tp.hint_color);
+  if (hint) set('--ink-2', hint);
   set('--mint', tp.button_color);
   set('--mint-ink', tp.button_text_color);
   set('--nav-bg', tp.header_bg_color);
-  const light = _tgLum(tp.bg_color || '#0b0d12') > 0.5;
   root.colorScheme = light ? 'light' : 'dark';   // нативные select/скроллбары
   // --surface-2 — самая частая панельная переменная (сегменты, селекты, тосты,
   // чипы). Раньше не маппилась: в светлой теме Telegram оставалась тёмной

@@ -1334,3 +1334,26 @@ def test_nav_and_cta_read_the_theme_variables_with_the_old_dark_as_fallback():
     assert "--nav-bg: #0b0d12;" in css and "--mint-ink: #06210f;" in css
     assert "var(--nav-bg" in css, "the nav still hardcodes its dark"
     assert "color: var(--mint-ink)" in css, "the CTA text ignores button_text_color"
+
+
+def test_the_mobile_tab_bar_follows_the_theme_too():
+    """QA sweep caught the last dark island: .nav-links hardcoded rgba(11,13,18,.88)
+    + #1c212c border — a black bar under a light page. It now mixes from
+    --nav-bg/--ink with the old literals kept as pre-color-mix fallbacks."""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    mobile = css.index("@media (max-width: 680px)")   # the desktop .nav-links has no bar
+    start = css.index(".nav-links {", mobile)
+    block = css[start:start + 700]
+    assert "color-mix(in srgb, var(--nav-bg) 90%, transparent)" in block
+    assert "color-mix(in srgb, var(--ink) 12%, transparent)" in block
+    assert "rgba(11, 13, 18, .88)" in block, "fallback for engines without color-mix"
+
+
+def test_hint_color_is_clamped_to_a_readable_contrast():
+    """Telegram's hint #8e8e93 measured 2.89–3.26:1 under readable text in light
+    theme (13 elements). The theme pass must walk an unreadable hint toward the
+    text color until WCAG 4.5:1, and leave a passing dark hint untouched."""
+    body = _fn_body("applyTgTheme")
+    assert "_tgContrast(hint, bg) < 4.5" in body
+    assert "_tgMix(hint" in body
+    assert "_tgLum(tp.text_color) > _tgLum(hint)" in body, "must mix toward the text color, not away"
