@@ -3,8 +3,8 @@
 These lock behaviours that are invisible to pytest-style tests but were each a
 real production bug:
 
-* a second `_ws.onopen = ...` assignment silently replaced the first, so polling
-  never stopped when the WebSocket connected (double traffic, two renderers);
+* a second `_ws.onopen = ...` assignment silently replaced the first, so the
+  reconnect bookkeeping of its predecessor vanished;
 * `_ws.onerror` cleared the polling timer instead of starting it, and
   `startPolling()` returned as soon as a socket object existed — so a socket that
   never opened left the job list permanently frozen;
@@ -185,11 +185,29 @@ def test_unreachable_socket_degrades_to_polling():
     assert "_connectWS()" in start and "ensurePolling()" in start
 
 
-def test_ws_open_stops_polling_and_cancels_pending_redial():
+def test_ws_open_keeps_the_reconciler_and_cancels_pending_redial():
+    """01.10 real tunnel QA: a finished job stayed "queued" in the UI forever.
+    The old policy stopped polling the moment WS opened, so a terminal frame
+    lost during the handshake (fast job, silent proxy, iOS half-open) had no
+    recovery path. The socket is instant patches; the poller is a throttled
+    reconciler that never goes fully silent while jobs are active."""
     open_body = _handler_body("onopen")
-    assert "clearInterval(pollTimer)" in open_body, "WS open must stop HTTP polling"
+    assert "clearInterval(pollTimer)" not in open_body, \
+        "onopen killed the reconciler again — lost frames become frozen rows"
     assert "_wsReconnectAttempt = 0" in open_body
     assert "_wsReconnectTimer" in open_body, "a healthy socket must cancel its retry"
+    poll = _fn_body("ensurePolling")
+    assert "_reconTick" in poll and "WebSocket.OPEN" in poll, \
+        "the poller has no throttled reconcile mode while WS is healthy"
+    start = _fn_body("startPolling")
+    assert "_connectWS();" in start and "ensurePolling();" in start, \
+        "startPolling must run both channels, not pick one"
+    assert "if (entering && token) startPolling();" in JS, \
+        "the live channel must be dialed before the first job, not after"
+    # ...and the session itself dials it: a job created seconds after login used
+    # to beat the socket into the terminal event (real tunnel race, 01.10).
+    assert "if (token) startPolling();" in _fn_body("refreshAll"), \
+        "establishing a session does not open the live channel"
 
 
 def test_no_infinite_reconnect_and_no_anonymous_dial():
@@ -1367,3 +1385,25 @@ def test_no_decorative_islands_survive_the_theme():
     step = css[css.index(".step-n {"):css.index(".step-n {") + 300]
     assert "background: var(--mint)" in step and "color: var(--mint-ink)" in step
     assert "#232a38" not in css, "a hardcoded dark island is back"
+
+
+def test_long_upload_is_refused_before_the_bytes_are_wasted():
+    """30.09 real mini-app report (server logs, user tg:249741377): a long video
+    was uploaded in full, the server answered 402 after receiving every byte,
+    and the UI's only word was a 4-second toast — the user saw a blank overlay
+    and 'nothing happens'. The fix is ORDER: duration is known from metadata
+    before sending, so the budget dialog must open with numbers pre-upload,
+    and the 402 race must also dialog, never toast."""
+    submit = JS[JS.index('$("#job-form").addEventListener("submit"'):
+                JS.index("function uploadJob")]
+    assert "_probeDuration(f)" in _fn_body("setFile"), "duration is not probed on pick"
+    assert "openCredits(need, have)" in submit, "no pre-upload budget check"
+    assert submit.index("openCredits(need, have)") < submit.index("new FormData"), \
+        "the check runs after the upload body is already built"
+    assert "openCredits(null, null)" in submit, "a 402 race still toasts and vanishes"
+    # Browser QA 01.10 caught a decimal shift on this exact line (152.3 shown for
+    # a 15.23-minute tape). The formula must be sec*10/60 rounded up, over 60.
+    assert "Math.ceil(_fDur * 10 / 60) / 10" in submit, \
+        "pre-upload minute estimate drifted from seconds/60"
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert 'id="credits-dlg"' in html, "the dialog element vanished"

@@ -6,6 +6,7 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 
 let token = localStorage.getItem("ovoz_token") || null;
 let chosenFile = null;
+let _fDur = null;   // длительность выбранного медиа в секундах (проба метаданных)
 let jobType = "subtitles";
 
 // Session state that the boot path may touch before the file finished
@@ -232,6 +233,10 @@ function showStudio() {
   history.replaceState(null, "", "#studio");
   tgSyncBack();
   if (entering) refreshAll();
+  // Живой канал открывается ДО первой задачи: быстрый job успевал завершиться
+  // между POST и подпиской WS, терминальный кадр уходил в пустоту, и строка
+  // замерала «в очереди» (воспроизведено реальным туннель-QA 01.10).
+  if (entering && token) startPolling();
 }
 function showLanding() {
   $$(".hero, .how, .ling-demo, .turn-demo, .qator-demo, .jimlik-demo, .soz-demo, .nafis-demo, .caps, .pricing, .foot").forEach(el => el.classList.remove("hidden"));
@@ -1152,6 +1157,7 @@ dz.addEventListener("drop", (e) => {
 $("#j-file").addEventListener("change", () => { if ($("#j-file").files.length) setFile($("#j-file").files[0]); });
 function setFile(f) {
   chosenFile = f;
+  _probeDuration(f);   // честная цена загрузки известна ДО отправки байтов
   dz.classList.add("filled");
   const size = f.size < 1024 ? `${f.size} B`
     : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(1)} KB`
@@ -1162,18 +1168,60 @@ function setFile(f) {
   $("#drop-label").textContent = `✓ ${f.name} · ${size}`;
 }
 function clearFileLabel() {
-  chosenFile = null; dz.classList.remove("filled");
+  chosenFile = null; _fDur = null; dz.classList.remove("filled");
   delete $("#drop-label").dataset.i18nLocked;
   $("#drop-label").textContent = t("drop_hint");
 }
 
 // ─── job submit (with upload progress) ───
+// Реальный прогон в мини-аппе (30.09): пользователь залил длинное видео, сервер
+// честно ответил 402 уже ПОСЛЕ полного приёма байтов, а UI показал лишь тост на
+// 4 секунды — «странное окно и ничего не происходит». Байты потрачены, объяснения
+// нет. Правильный порядок: длительность медиа известна из метаданных до отправки —
+// значит нехватка минут показывается диалогом с цифрами ДО загрузки.
+function _probeDuration(f) {
+  _fDur = null;
+  const isMedia = /^(audio|video)\//.test(f.type)
+    || /\.(mp3|wav|m4a|aac|ogg|mp4|mov|webm)$/i.test(f.name || "");
+  if (!isMedia) return;
+  const isVideo = /^video\//.test(f.type) || /\.(mp4|mov|webm)$/i.test(f.name || "");
+  const el = document.createElement(isVideo ? "video" : "audio");
+  const url = URL.createObjectURL(f);
+  el.preload = "metadata";
+  el.onloadedmetadata = () => {
+    _fDur = Number.isFinite(el.duration) ? el.duration : null;
+    URL.revokeObjectURL(url);
+  };
+  el.onerror = () => URL.revokeObjectURL(url);
+  el.src = url;
+}
+function openCredits(need, have) {
+  const msg = $("#credits-msg");
+  msg.dataset.i18nLocked = "1";   // локализация живёт в момент открытия
+  msg.textContent = need == null ? t("credits_short")
+    : t("credits_need").replace("{need}", need).replace("{have}", have);
+  $("#credits-dlg").showModal();
+}
+$("#credits-close").addEventListener("click", () => $("#credits-dlg").close());
+$("#credits-pay").addEventListener("click", () => {
+  $("#credits-dlg").close();
+  openPay("pro");
+});
 $("#job-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const text = $("#j-text").value.trim();
   let file = chosenFile;
   if (!file && text) file = new File([text], "document.txt", { type: "text/plain" });
   if (!file) return toast(t("no_file"), true);
+  // премодерация бюджета: длинное видео при пустом балансе не должно вообще
+  // начинать путь по сети. Минуты = секунды/60, округление вверх до 0.1
+  // (браузер-QA 01.10 поймал на этой строке десятичный сдвиг: /6*10 давало 152.3
+  // вместо 15.3 — формула обязана быть ровно одной операцией на строку).
+  if (file === chosenFile && _fDur) {
+    const need = Math.ceil(_fDur * 10 / 60) / 10;
+    const have = _me ? _me.balance_minutes : null;
+    if (have != null && need > have) { openCredits(need, have); return; }
+  }
   const fd = new FormData();
   fd.append("file", file);
   fd.append("jtype", jobType);
@@ -1205,7 +1253,8 @@ $("#job-form").addEventListener("submit", async (ev) => {
     adoptJob(created.job || created);
     startPolling(); refreshMe();
   } catch (e) {
-    toast(e.code === 402 ? t("credits_short") : e.message, true);
+    if (e.code === 402) openCredits(null, null);   // гонка баланса: диалог, не тост
+    else toast(e.message, true);
     skel.remove();
     refreshJobs(); // restore actual state
   } finally { $("#btn-run").disabled = false; }
@@ -1251,6 +1300,7 @@ function uploadJob(fd) {
 // ─── jobs list ───
 let pollTimer = null;
 let pollFailures = 0;
+let _reconTick = 0;   // счётчик «страховочных» тиков при живом WS
 let prevStatuses = {};  // track for completion announcement
 let _ws = null;         // WebSocket connection
 let _wsReconnectTimer = null;
@@ -1378,8 +1428,13 @@ function adoptJob(job) {
 
 function startPolling() {
   if (!token) return; // anonymous visitors must not dial out with a null session
-  // WebSocket first; HTTP polling is the degradation path, never both at once.
-  if (_connectWS()) return;
+  // Оба канала намеренно. Сокет патчит строку в то же мгновение, что и сервер;
+  // поллер остаётся сверителем. Политика «никогда не оба сразу» была причиной
+  // замирания: потерянный на рукопожатии терминальный кадр (быстрый job, молча
+  // съевший кадр прокси, half-open после сна iOS) нечем было восстановить,
+  // и строка висела «в очереди» вечно. При живом WS поллер не молчит, а
+  // режет темп до ~20 с (см. _reconTick в ensurePolling).
+  _connectWS();
   ensurePolling();
 }
 
@@ -1387,6 +1442,12 @@ function ensurePolling() {
   if (!token || pollTimer) return;
   pollFailures = 0;
   pollTimer = setInterval(async () => {
+    // Здоровый живой канал — основной источник обновлений; поллер при нём
+    // страховка, и каждые 7 тиков из 8 он ничего не просит (~20 с на сверку).
+    if (_ws && _ws.readyState === WebSocket.OPEN) {
+      _reconTick = (_reconTick + 1) % 8;
+      if (_reconTick) return;
+    }
     try {
       let url = "/api/jobs?limit=20";
       if (jobFilter) url += "&status=" + encodeURIComponent(jobFilter);
@@ -1469,8 +1530,8 @@ function _openWS(ticket) {
       if (!mine()) return;
       _wsReconnectAttempt = 0;
       if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
-      // WS connected: stop polling if active
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      // Поллер НЕ гасится: при живом сокете он сам замедляется до сверочного
+      // темпа (см. ensurePolling) — это единственное, что лечит потерянный кадр.
     };
     // Живость: сервер шлёт ping каждые 30 с. Любой кадр — ping или событие —
     // доказывает путь жив; 90 с без единого кадра доказывают обратное, даже
@@ -2480,6 +2541,10 @@ async function refreshAll() {
   if (_allFetch) return _allFetch;
   _allFetch = Promise.all([refreshMe(), refreshJobs(), refreshGlossary(), refreshNotif()])
     .finally(() => { _allFetch = null; });
+  // Сессия появилась — живой канал открывается сразу, не дожидаясь первой
+  // задачи: 01.10 быстрый job завершился до подписки WS, терминальный кадр был
+  // потерян, а скрытая вкладка ещё и придушила поллер — строка мертва вечно.
+  if (token) startPolling();
   maybeShowOnboarding();
   return _allFetch;
 }
