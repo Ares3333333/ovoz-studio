@@ -30,6 +30,7 @@ const SERVER_ERROR_MAP = {
   'Secret must be at least': 'err_secret_short',
   'Contact is required': 'err_need_contact',
   'Insufficient credits': 'credits_short',
+  'Feature disabled': 'err_feature_disabled',
   'Too many active jobs': 'err_rate_limited',
   'Too many failed attempts': 'err_rate_limited',
   'Admin key required': 'err_forbidden',

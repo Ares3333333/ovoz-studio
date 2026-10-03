@@ -42,7 +42,8 @@ from .ling import srt as srt_mod
 from .ling import word as word_mod
 from .ling.romanizer import normalize_target as _ling_target, normalize_uzbek
 from .config import admin_secret, settings, webhook_secret
-from .flags import load as _flags_load, get_all as _flags_all, set_flag as _flag_set
+from .flags import load as _flags_load, get_all as _flags_all, set_flag as _flag_set, \
+    is_enabled as _flag_enabled
 from .pipeline import JOB_TYPES
 from .errors import ErrorCode
 from .notify import notify, NotifKind, maybe_notify_balance_low
@@ -871,6 +872,16 @@ def current_user(authorization: str | None = Header(None),
     return user
 
 
+def _require_flag(flag: str, user: dict) -> None:
+    """Kill-switch gate for a shipped feature (01.10: flags existed, nothing
+    read them — the admin panel promised a switch it did not have). The flag
+    check runs BEFORE any plan or ownership logic: when a feature is off, it is
+    off for everyone, and a disabled endpoint must not leak how it would have
+    answered (404-vs-409 ordering on shares, plan texts on keys)."""
+    if not _flag_enabled(flag, user_id=user["id"], plan=user.get("plan", "free")):
+        raise HTTPException(403, "Feature disabled")
+
+
 @app.post("/api/auth/register", tags=["auth"])
 def register(request: Request, name: str = Form(...), contact: str = Form(...),
              secret: str = Form(...)) -> dict:
@@ -1236,6 +1247,7 @@ def create_jobs_batch(
     """Upload several files as independent jobs in one request.
     Per-file results: successes get a job, failures carry an error message.
     Whole-batch is rejected only for global validation (bad type/langs/too many files)."""
+    _require_flag("batch_jobs", user)
     if jtype not in JOB_TYPES:
         raise HTTPException(400, f"type must be one of {sorted(JOB_TYPES)}")
     if src not in LANGS or tgt not in LANGS or src == tgt:
@@ -1635,6 +1647,7 @@ def create_job_share(jid: str, user: dict = Depends(current_user),
                      ttl_hours: int = Form(72),
                      max_downloads: int = Form(0)) -> dict:
     """Generate a time-limited public share link for job artifacts."""
+    _require_flag("job_sharing", user)
     job = db.get_job(jid)
     if not job or job["user_id"] != user["id"]:
         raise HTTPException(404, "Job not found")
@@ -2043,6 +2056,7 @@ def account_usage(
 def create_key(user: dict = Depends(current_user),
                label: str = Form("")) -> dict:
     """Generate a new API key. Shown only once — store securely."""
+    _require_flag("api_keys", user)
     plan = user.get("plan", "free")
     if plan == "free":
         raise HTTPException(403, "API keys require Pro or Studio plan")
@@ -2075,6 +2089,7 @@ def delete_key(kid: str, user: dict = Depends(current_user)) -> dict:
 def create_webhook_endpoint(user: dict = Depends(current_user),
                            url: str = Form(...), events: str = Form("job.done,job.failed")) -> dict:
     """Register an outbound webhook URL. Studio plan required."""
+    _require_flag("webhook_out", user)
     if user.get("plan", "free") != "studio":
         raise HTTPException(403, "Webhooks require Studio plan")
     # HTTPS-prefix alone is not an SSRF control (see webhooks.safe_webhook_url):

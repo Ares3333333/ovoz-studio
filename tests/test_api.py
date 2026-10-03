@@ -1350,6 +1350,12 @@ def test_flags_admin_update(client):
     assert r.status_code == 200
     assert r.json()["updated"]["enabled"] is True
     assert r.json()["updated"]["pct"] == 50
+    # Round 42 made this flag gate a live endpoint: a leaked 50% rollout now
+    # really does lock half of every later batch test out. The switch is the
+    # thing under test — restore it afterwards.
+    r = client.patch("/api/admin/flags/batch_jobs", headers=admin_hdr,
+                     json={"enabled": True, "pct": 100})
+    assert r.status_code == 200 and r.json()["updated"]["pct"] == 100
 
 
 def test_flags_requires_admin(client):

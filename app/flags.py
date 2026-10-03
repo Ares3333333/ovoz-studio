@@ -56,6 +56,10 @@ def load() -> None:
                 if k not in _flags or not isinstance(_flags[k], dict):
                     _flags[k] = copy.deepcopy(v)
                     changed = True
+            for k, stale in _MIGRATIONS:
+                if _flags.get(k) == stale:
+                    _flags[k] = copy.deepcopy(_DEFAULTS[k])
+                    changed = True
             if changed:
                 _save()
         else:
@@ -74,14 +78,29 @@ def _save() -> None:
 
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
+    # Every flag here gates a SHIPPED endpoint (job_sharing → POST /share,
+    # batch_jobs → POST /api/jobs/batch, api_keys → POST /account/keys,
+    # webhook_out → POST /api/webhooks). Aspirational entries nobody enforces
+    # were removed 01.10: a flag that gates nothing is decoration. min_plan is
+    # "free" for all of them on purpose — the flag is the ops kill switch, and
+    # plan eligibility already lives (and is tested) inside each handler; a
+    # second copy here would make one endpoint answer two different 403s.
     "job_sharing": {"enabled": True, "min_plan": "free", "pct": 100},
-    "api_keys": {"enabled": True, "min_plan": "pro", "pct": 100},
-    "webhook_out": {"enabled": False, "min_plan": "studio", "pct": 0},
-    "batch_jobs": {"enabled": False, "min_plan": "studio", "pct": 10},
-    "ai_suggestions": {"enabled": False, "min_plan": "pro", "pct": 0},
-    "dark_light_toggle": {"enabled": False, "min_plan": "free", "pct": 5},
+    "api_keys": {"enabled": True, "min_plan": "free", "pct": 100},
+    "webhook_out": {"enabled": True, "min_plan": "free", "pct": 100},
+    "batch_jobs": {"enabled": True, "min_plan": "free", "pct": 100},
+    # Gated fail-open by _ling_guard in main.py (an older install without this
+    # key keeps the moat ON; only an explicit enabled:false turns it off).
     "uzbek_language_engine": {"enabled": True, "min_plan": "free", "pct": 100},
 }
+
+# Values a previous release persisted as defaults for features that are now
+# live. load() upgrades exactly these stored objects — an operator's deliberate
+# override (any other value) survives untouched.
+_MIGRATIONS: list[tuple[str, dict[str, Any]]] = [
+    ("webhook_out", {"enabled": False, "min_plan": "studio", "pct": 0}),
+    ("batch_jobs", {"enabled": False, "min_plan": "studio", "pct": 10}),
+]
 
 _PLAN_LEVEL = {"free": 0, "pro": 1, "studio": 2}
 
